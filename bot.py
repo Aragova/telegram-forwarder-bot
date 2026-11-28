@@ -181,6 +181,8 @@ ui_policy: UIErrorPolicy | None = None
 last_notifications: dict[str, datetime] = {}
 rule_ui_tasks: dict[str, asyncio.Task] = {}
 rescan_recovery_task: asyncio.Task | None = None
+rescan_recovery_stop: asyncio.Event | None = None
+rescan_recovery_job: asyncio.Task | None = None
 user_handlers_ctx: UserHandlersContext | None = None
 admin_handlers_ctx: AdminHandlersContext | None = None
 repost_campaign_runtime_tasks: RepostCampaignRuntimeTasks | None = None
@@ -861,29 +863,41 @@ async def _run_rescan_rule_job(
     )
 
 
-async def _rescan_recovery_loop() -> None:
-    """Only the polling owner recovers interrupted scans, one at a time."""
-    while runtime_ownership.can_poll:
+async def _rescan_recovery_loop(stop_event: asyncio.Event) -> None:
+    """Recover expired DB leases, with an immediate shutdown wake-up."""
+    global rescan_recovery_job
+    while not stop_event.is_set() and runtime_ownership.can_poll:
         try:
             for rule_id in await run_db(db.list_expired_rule_rescans):
-                if not runtime_ownership.can_poll:
+                if stop_event.is_set() or not runtime_ownership.can_poll:
                     return
                 # A fenced-out scan may cancel its own task, never the
                 # recovery supervisor itself.
-                task = create_background_task(
+                rescan_recovery_job = create_background_task(
                     _run_rescan_rule_job(rule_id=rule_id, recovery=True),
                     name=f"rescan-recover:{rule_id}",
                 )
-                await asyncio.gather(task, return_exceptions=True)
+                try:
+                    await asyncio.gather(rescan_recovery_job, return_exceptions=True)
+                finally:
+                    rescan_recovery_job = None
         except Exception:
             logger.exception("RESCAN_RECOVERY_LOOP_FAILED")
-        await asyncio.sleep(15)
+        # Expiry is a database-clock deadline, not a local notification.
+        # Keep the bounded periodic check, but wake immediately on shutdown.
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=15)
+        except TimeoutError:
+            pass
 
 
 def _start_rescan_recovery_runtime() -> None:
-    global rescan_recovery_task
+    global rescan_recovery_task, rescan_recovery_stop
     if runtime_ownership.can_poll and (rescan_recovery_task is None or rescan_recovery_task.done()):
-        rescan_recovery_task = create_background_task(_rescan_recovery_loop(), name="rescan-recovery")
+        rescan_recovery_stop = asyncio.Event()
+        rescan_recovery_task = create_background_task(
+            _rescan_recovery_loop(rescan_recovery_stop), name="rescan-recovery",
+        )
 
 
 @dataclass(slots=True)
@@ -8598,7 +8612,7 @@ async def _shutdown_runtime(
     close_telegram_clients: bool,
     close_bot_session: bool,
 ) -> bool:
-    global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, repost_campaign_runtime_tasks, channel_title_sync_task, rescan_recovery_task
+    global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, repost_campaign_runtime_tasks, channel_title_sync_task, rescan_recovery_task, rescan_recovery_stop
 
     runtime_ownership.begin_shutdown()
     # Stop producers before consumers. The scheduler joins its current SQL
@@ -8611,9 +8625,13 @@ async def _shutdown_runtime(
     # Cancel and join durable rescans before closing clients. Their lease and
     # commit marker remain in PostgreSQL for startup recovery.
     if rescan_recovery_task is not None:
-        rescan_recovery_task.cancel()
+        if rescan_recovery_stop is not None:
+            rescan_recovery_stop.set()
+        if rescan_recovery_job is not None and not rescan_recovery_job.done():
+            rescan_recovery_job.cancel()
         await asyncio.gather(rescan_recovery_task, return_exceptions=True)
         rescan_recovery_task = None
+        rescan_recovery_stop = None
     tasks = list(rule_ui_tasks.values())
     for task in tasks:
         task.cancel()
@@ -8621,15 +8639,7 @@ async def _shutdown_runtime(
 
     workers_drain_complete = True
     if stop_workers_runtime:
-        while True:
-            try:
-                await stop_job_workers_runtime()
-                break
-            except Exception:
-                # Do not return from main while an owned worker still has
-                # children. systemd's outer stop deadline is the last resort.
-                logger.exception("JOB_WORKERS_SHUTDOWN_INCOMPLETE | retrying drain")
-                await asyncio.sleep(1)
+        await stop_job_workers_runtime(wait_until_complete=True)
 
     if close_dashboard_tasks:
         tasks = list(dashboard_tasks.values())
@@ -8644,15 +8654,9 @@ async def _shutdown_runtime(
         channel_title_sync_task = None
 
     campaign_drain_complete = True
-    while repost_campaign_runtime_tasks is not None:
-        try:
-            await repost_campaign_runtime_tasks.stop()
-        except Exception:
-            # Do not cancel remaining RPCs a second time by leaving asyncio.run.
-            logger.exception("REPOST_CAMPAIGN_SHUTDOWN_INCOMPLETE | retrying drain")
-            await asyncio.sleep(1)
-        else:
-            repost_campaign_runtime_tasks = None
+    if repost_campaign_runtime_tasks is not None:
+        await repost_campaign_runtime_tasks.stop(wait_until_complete=True)
+        repost_campaign_runtime_tasks = None
 
     resource_drain_complete = workers_drain_complete and campaign_drain_complete
 
@@ -8850,8 +8854,14 @@ async def start_job_workers_runtime(*, resume: bool = False) -> None:
     }, resume=resume)
 
 
-async def stop_job_workers_runtime() -> None:
-    await job_workers.stop(timeout_sec=WORKER_RESOURCE_POLICY.graceful_shutdown_timeout_sec + 20)
+async def stop_job_workers_runtime(*, wait_until_complete: bool = False) -> None:
+    if wait_until_complete:
+        await job_workers.stop(
+            timeout_sec=WORKER_RESOURCE_POLICY.graceful_shutdown_timeout_sec + 20,
+            wait_until_complete=True,
+        )
+    else:
+        await job_workers.stop(timeout_sec=WORKER_RESOURCE_POLICY.graceful_shutdown_timeout_sec + 20)
 
 
 def _register_user_saas_handlers() -> None:

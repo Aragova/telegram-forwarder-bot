@@ -298,7 +298,7 @@ def test_bot_polling_preserves_session_until_campaign_shutdown():
     assert session_options[0].value is False
 
 
-def test_incomplete_campaign_drain_retries_before_closing_telegram_clients():
+def test_shutdown_requests_completion_before_closing_telegram_clients():
     import ast
     from pathlib import Path
 
@@ -309,10 +309,9 @@ def test_incomplete_campaign_drain_retries_before_closing_telegram_clients():
     )
     events = []
 
-    async def fail_drain():
+    async def fail_drain(*, wait_until_complete):
+        assert wait_until_complete is True
         events.append("campaign_stop")
-        if events.count("campaign_stop") == 1:
-            raise RuntimeError("in-flight Telegram RPC")
         assert "telethon_disconnect" not in events
         assert "bot_session_close" not in events
 
@@ -353,7 +352,7 @@ def test_incomplete_campaign_drain_retries_before_closing_telegram_clients():
         close_telegram_clients=True, close_bot_session=True,
     ))
     assert result is True
-    assert events.count("campaign_stop") == 2
+    assert events.count("campaign_stop") == 1
     assert "background_cleanup" in events and "processor_cleanup" in events
     assert events.index("telethon_disconnect") > events.index("campaign_stop")
     assert "reaction_disconnect" in events
@@ -397,3 +396,40 @@ def test_main_preserves_original_role_error_when_shutdown_is_incomplete():
     exec(compile(module, "bot.py", "exec"), ctx)
     with pytest.raises(ValueError, match="original role error"):
         asyncio.run(ctx["main"]("bot"))
+
+
+def test_shutdown_campaign_drain_joins_remaining_cleanup_without_recancelling(monkeypatch):
+    from app import worker_shutdown
+
+    async def scenario():
+        manager = RepostCampaignRuntimeTasks(repo=SimpleNamespace(), bot=SimpleNamespace())
+        cleanup_started = asyncio.Event()
+        cleanup_done = asyncio.Event()
+        release = asyncio.Event()
+
+        async def worker():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleanup_started.set()
+                await release.wait()
+                cleanup_done.set()
+
+        child = asyncio.create_task(worker())
+        manager._tasks.append(child)
+        await asyncio.sleep(0)
+        stop = asyncio.create_task(manager.stop(timeout_sec=0.01, wait_until_complete=True))
+        try:
+            await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+            await asyncio.sleep(0.05)
+            assert not stop.done()
+            assert not child.done()
+            assert child.cancelling() == 1
+        finally:
+            release.set()
+            await asyncio.wait_for(stop, timeout=1)
+        assert cleanup_done.is_set()
+        assert not manager.is_running()
+
+    monkeypatch.setattr(worker_shutdown, "_CANCEL_SETTLE_TIMEOUT_SEC", 0.01)
+    asyncio.run(scenario())

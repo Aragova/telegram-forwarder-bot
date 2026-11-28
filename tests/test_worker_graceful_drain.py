@@ -103,7 +103,7 @@ def test_production_service_timeout_exceeds_worker_grace():
 
 def test_no_instant_cancel_during_bot_shutdown():
     source = Path("bot.py").read_text(encoding="utf-8")
-    start = source.index("async def stop_job_workers_runtime()")
+    start = source.index("async def stop_job_workers_runtime(")
     end = source.index("def _register_user_saas_handlers", start)
     body = source[start:end]
     assert "await job_workers.stop(" in body
@@ -123,7 +123,7 @@ def test_all_role_keeps_bot_session_open_until_after_worker_drain():
     shutdown_start = source.index("async def _shutdown_runtime(")
     shutdown_end = source.index("async def _run_scheduler_role_loop()", shutdown_start)
     shutdown = source[shutdown_start:shutdown_end]
-    assert shutdown.index("await stop_job_workers_runtime()") < shutdown.index("await bot.session.close()")
+    assert shutdown.index("await stop_job_workers_runtime(wait_until_complete=True)") < shutdown.index("await bot.session.close()")
 
 
 
@@ -216,6 +216,42 @@ def test_shutdown_stops_scheduler_and_rescan_before_draining_workers():
     source = Path("bot.py").read_text(encoding="utf-8")
     shutdown = source[source.index("async def _shutdown_runtime("):
                       source.index("async def _run_scheduler_role_loop()")]
-    assert shutdown.index("await asyncio.gather(scheduler_runtime_task") < shutdown.index("await stop_job_workers_runtime()")
-    assert shutdown.index("await asyncio.gather(rescan_recovery_task") < shutdown.index("await stop_job_workers_runtime()")
-    assert shutdown.index("await stop_job_workers_runtime()") < shutdown.index("await raw_telethon.disconnect()")
+    assert shutdown.index("await asyncio.gather(scheduler_runtime_task") < shutdown.index("await stop_job_workers_runtime(wait_until_complete=True)")
+    assert shutdown.index("await asyncio.gather(rescan_recovery_task") < shutdown.index("await stop_job_workers_runtime(wait_until_complete=True)")
+    assert shutdown.index("await stop_job_workers_runtime(wait_until_complete=True)") < shutdown.index("await raw_telethon.disconnect()")
+
+
+def test_shutdown_job_lifecycle_joins_pending_cleanup_without_recancelling(monkeypatch):
+    from app import worker_shutdown
+    from app.job_worker_lifecycle import JobWorkerLifecycle
+    from app.runtime_roles import RuntimeOwnership
+
+    async def scenario():
+        owner = RuntimeOwnership()
+        owner.bind("all")
+        lifecycle = JobWorkerLifecycle(owner, logging.getLogger("test.shutdown"))
+        cleaning, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def worker(stop):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaning.set()
+                await release.wait()
+                finished.set()
+
+        lifecycle.ensure_running({"light": worker})
+        await asyncio.sleep(0)
+        owner.begin_shutdown()
+        stop = asyncio.create_task(lifecycle.stop(timeout_sec=0.01, wait_until_complete=True))
+        try:
+            await asyncio.wait_for(cleaning.wait(), timeout=1)
+            await asyncio.sleep(0.05)
+            assert not stop.done() and lifecycle.live_count == 1
+        finally:
+            release.set()
+            await asyncio.wait_for(stop, timeout=1)
+        assert finished.is_set() and lifecycle.live_count == 0
+
+    monkeypatch.setattr(worker_shutdown, "_CANCEL_SETTLE_TIMEOUT_SEC", 0.01)
+    asyncio.run(scenario())

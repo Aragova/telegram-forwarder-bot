@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from typing import Any
 
 from app.runtime_roles import RuntimeOwnership
-from app.runtime_utils import create_background_task
+from app.runtime_utils import create_background_task, wait_for_db_task
 from app.worker_shutdown import drain_job_workers
 
 WorkerFactory = Callable[[asyncio.Event], Coroutine[Any, Any, None]]
@@ -97,7 +97,7 @@ class JobWorkerLifecycle:
             if self._ownership.can_start_workers:
                 await self._changed.wait()
 
-    async def stop(self, *, timeout_sec: float) -> None:
+    async def stop(self, *, timeout_sec: float, wait_until_complete: bool = False) -> None:
         self._paused = True
         self._stop_requests += 1
         self._changed.set()
@@ -108,7 +108,15 @@ class JobWorkerLifecycle:
                     timeout_sec=timeout_sec, logger=self._logger,
                 )
                 if self.live_count:
-                    raise RuntimeError("Не завершены активные job workers")
+                    if not wait_until_complete:
+                        raise RuntimeError("Не завершены активные job workers")
+                    # Shutdown only: the initial bounded drain has already
+                    # requested cancellation. Join the remaining cleanup,
+                    # without a second cancel or a sleep/retry loop.
+                    self._logger.warning("JOB_WORKERS_SHUTDOWN_WAITING_FOR_CLEANUP")
+                    await wait_for_db_task(asyncio.gather(
+                        *self._task_snapshot(), return_exceptions=True,
+                    ))
                 with self._tasks_lock:
                     self._tasks.clear()
                 self._stop_event = None

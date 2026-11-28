@@ -64,3 +64,33 @@ def test_scheduler_cancellation_joins_running_tick_without_starting_next_rule(mo
             await task
         assert finished.is_set() and len(ticks) == 1
     asyncio.run(scenario())
+
+
+def test_recovery_stop_event_wakes_supervisor_without_waiting_for_period():
+    import ast
+    import logging
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    source = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    fn = next(n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
+              and n.name == "_rescan_recovery_loop")
+
+    async def scenario():
+        entered = asyncio.Event()
+        stop = asyncio.Event()
+        async def read(*args):
+            entered.set()
+            return []
+        ns = {"asyncio": asyncio, "runtime_ownership": SimpleNamespace(can_poll=True),
+              "db": SimpleNamespace(list_expired_rule_rescans=Mock()),
+              "run_db": AsyncMock(side_effect=read), "logger": logging.getLogger(__name__)}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), "bot.py", "exec"), ns)
+        supervisor = asyncio.create_task(ns["_rescan_recovery_loop"](stop))
+        await entered.wait()
+        stop.set()
+        await asyncio.wait_for(supervisor, timeout=0.5)
+        ns["run_db"].assert_awaited_once()
+
+    asyncio.run(scenario())

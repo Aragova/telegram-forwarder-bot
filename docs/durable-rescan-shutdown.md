@@ -51,3 +51,6 @@ UI запускает тот же fresh/keep алгоритм. Под блоки
 Проверить действующий systemd override (SIGINT, TimeoutStopUSec=720s) перед
 выкаткой. Не применять старый код одновременно с новым. Не требуется
 пересканировать нормальные правила или обновлять их индексы.
+
+
+Shutdown waits directly on remaining worker/campaign task completion after the initial bounded drain. It does not re-cancel their cleanup. The recovery supervisor uses a stop event to wake immediately when idle; its current rescan child is cancelled and joined separately. The periodic database expiry check remains necessary because leases may expire without any local notification. Manual worker stop retains its existing bounded behavior.

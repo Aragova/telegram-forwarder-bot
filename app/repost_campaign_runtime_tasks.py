@@ -14,6 +14,7 @@ from app.saved_post_renderer import SavedPostRenderer
 from app.transport import wrap_bot
 from app.transport_policy import build_sender_bot_policy
 from app.worker_shutdown import drain_job_workers
+from app.runtime_utils import wait_for_db_task
 
 
 class RepostCampaignRuntimeTasks:
@@ -124,7 +125,7 @@ class RepostCampaignRuntimeTasks:
             self.delete_batch_limit,
         )
 
-    async def stop(self, timeout_sec: float = 15.0) -> None:
+    async def stop(self, timeout_sec: float = 15.0, *, wait_until_complete: bool = False) -> None:
         if not self._tasks:
             self.logger.info("REPOST_CAMPAIGN_RUNTIME_TASKS_STOPPED | tasks=0")
             return
@@ -139,9 +140,14 @@ class RepostCampaignRuntimeTasks:
                 "REPOST_CAMPAIGN_RUNTIME_TASKS_DRAIN_INCOMPLETE | remaining=%s | action=retain_ownership",
                 len(self._tasks),
             )
-            raise RuntimeError(
-                f"Не завершены фоновые задачи кампании ({len(self._tasks)}); Telegram-клиенты нельзя закрывать"
-            )
+            if not wait_until_complete:
+                raise RuntimeError(
+                    f"Не завершены фоновые задачи кампании ({len(self._tasks)}); Telegram-клиенты нельзя закрывать"
+                )
+            # Wait on the actual task completion, never cancel its in-flight
+            # cleanup again just because the grace period elapsed.
+            await wait_for_db_task(asyncio.gather(*self._tasks, return_exceptions=True))
+            self._tasks.clear()
         self.logger.info("REPOST_CAMPAIGN_RUNTIME_TASKS_STOPPED | tasks=%s", len(tasks))
 
     def _cancel_started_tasks_after_failed_start(self, started_tasks_before: int) -> None:
