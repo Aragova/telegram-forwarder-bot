@@ -381,9 +381,13 @@ class RuleCardCacheEntry:
 RULE_CARD_CACHE_TTL_SEC = 15.0
 rule_card_cache: dict[int, RuleCardCacheEntry] = {}
 rule_card_build_locks: dict[int, asyncio.Lock] = {}
+# Only in-flight renders need a generation marker; do not retain deleted IDs.
+rule_card_render_tokens: dict[int, object] = {}
 
 def invalidate_rule_card_cache(rule_id: int) -> None:
-    rule_card_cache.pop(int(rule_id), None)
+    rule_id = int(rule_id)
+    rule_card_render_tokens.pop(rule_id, None)
+    rule_card_cache.pop(rule_id, None)
 
 
 def invalidate_rule_card_cache_many(rule_ids: list[int] | tuple[int, ...] | set[int]) -> None:
@@ -482,18 +486,24 @@ async def build_rule_card_payload_cached(rule_id: int) -> tuple[str | None, Inli
         if cached:
             return cached.text, cached.keyboard, "cache_hit_after_wait"
 
-        render = await _build_rule_card_render_async(rule_id)
-        if not render:
-            return None, None, "rule_not_found"
+        key = int(rule_id)
+        token = object()
+        rule_card_render_tokens[key] = token
+        try:
+            render = await _build_rule_card_render_async(rule_id)
+            if not render:
+                return None, None, "rule_not_found"
 
-        entry = RuleCardCacheEntry(
-            text=render["text"],
-            keyboard=render["reply_markup"],
-            created_at_monotonic=time.monotonic(),
-        )
-        rule_card_cache[int(rule_id)] = entry
-
-        return entry.text, entry.keyboard, "rebuilt"
+            entry = RuleCardCacheEntry(
+                text=render["text"],
+                keyboard=render["reply_markup"],
+                created_at_monotonic=time.monotonic(),
+            )
+            if rule_card_render_tokens.get(key) is token:
+                rule_card_cache[key] = entry
+            return entry.text, entry.keyboard, "rebuilt"
+        finally:
+            rule_card_render_tokens.pop(key, None)
 
 async def _show_rule_processing_screen(
     *,
@@ -901,7 +911,7 @@ async def _rescan_recovery_loop(stop_event: asyncio.Event) -> None:
                 pass
     finally:
         if rescan_recovery_job is not None:
-            if not rescan_recovery_job.done():
+            if not rescan_recovery_job.done() and not rescan_recovery_job.cancelling():
                 rescan_recovery_job.cancel()
             await asyncio.gather(rescan_recovery_job, return_exceptions=True)
             rescan_recovery_job = None
@@ -8671,6 +8681,8 @@ async def _shutdown_runtime(
         scheduler_runtime_task.cancel()
     if rescan_recovery_stop is not None:
         rescan_recovery_stop.set()
+    if rescan_recovery_job is not None and not rescan_recovery_job.done() and not rescan_recovery_job.cancelling():
+        rescan_recovery_job.cancel()
     tasks = list(rule_ui_tasks.values())
     for task in tasks:
         task.cancel()
