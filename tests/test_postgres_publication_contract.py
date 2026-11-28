@@ -2609,3 +2609,32 @@ def test_recovery_claim_skips_locked_route(repo):
                 assert pool.submit(claim).result(timeout=3) is None
         claimed = pool.submit(claim).result(timeout=3)
     assert claimed is not None and claimed[0] != token
+
+
+def test_expired_rescan_selection_skips_locked_first_route(repo):
+    _, first, _, _, _, _ = seed(repo, uuid4().int % 10**10)
+    _, second, _, _, _, _ = seed(repo, uuid4().int % 10**10)
+    repo.begin_rule_rescan(first, actor_id=1)
+    repo.begin_rule_rescan(second, actor_id=1)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            # Put these two ahead of any expired fixtures from earlier tests.
+            cur.execute("UPDATE routing SET rescan_lease_until='2000-01-01' WHERE id=%s", (first,))
+            cur.execute("UPDATE routing SET rescan_lease_until='2000-01-02' WHERE id=%s", (second,))
+    assert repo.list_expired_rule_rescans(1, phase="scanning") == [first]
+
+    def select_and_claim():
+        try:
+            ids = repo.list_expired_rule_rescans(1, phase="scanning")
+            return ids, repo.claim_interrupted_rule_rescan(ids[0], phase="scanning")
+        finally:
+            repo.client.close_thread_connection()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM routing WHERE id=%s FOR UPDATE", (first,))
+                ids, claimed = pool.submit(select_and_claim).result(timeout=3)
+                assert ids == [second]
+                assert claimed is not None
+        assert repo.list_expired_rule_rescans(1, phase="scanning") == [first]
