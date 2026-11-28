@@ -2342,6 +2342,12 @@ def test_durable_rescan_recovery_fences_old_owner_and_committed_phase(repo, fres
         repo.restart_rule_queue(rule_id, owner_token=final_token, **kwargs)
     assert repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=final_token,
                                    queue_rebuilt=True) is initially_active
+    # Retrying a lost commit reply must neither lose nor duplicate the durable audit.
+    assert repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=final_token,
+                                   queue_rebuilt=True) is initially_active
+    audits = [row for row in repo.get_audit_for_rule(rule_id)
+              if row["event_type"] == "rule_rescan_recovered"]
+    assert len(audits) == 1
     with repo.connect() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT id FROM deliveries WHERE rule_id=%s ORDER BY id", (rule_id,))
@@ -2380,3 +2386,29 @@ def test_durable_rescan_serializes_schedule_and_rejects_pre_lock_confirmation(re
     assert owner != legacy
     assert repo.get_rule_rescan_operation(rule_id, owner)["old_next_run_at"] == "2026-11-29T13:00:00+00:00"
     assert repo.finish_rule_rescan(rule_id, was_active=False, owner_token=owner) is False
+
+
+def test_recovered_rescan_release_retry_preserves_scope_changed_pause(repo):
+    _, rule_id, _, source_ids, source, target = seed(repo, uuid4().int % 10**10)
+    scope = (source, None, target, None, "repost")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=TRUE WHERE id=%s", (rule_id,))
+    active, token = repo.begin_rule_rescan(rule_id, fresh=True, actor_id=1,
+                                          expected_scope=scope)
+    assert active
+    op = repo.get_rule_rescan_operation(rule_id, token)
+    repo.restart_rule_queue(rule_id, owner_token=token, allowed_message_ids=set(source_ids),
+                            include_newer_than_message_id=op["watermark"], expected_scope=scope)
+    _expire_rescan_lease(repo, rule_id)
+    owner, _ = repo.claim_interrupted_rule_rescan(rule_id)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET target_thread_id=42 WHERE id=%s", (rule_id,))
+    assert repo.finish_rule_rescan(rule_id, was_active=True, owner_token=owner,
+                                   queue_rebuilt=True) is False
+    assert repo.finish_rule_rescan(rule_id, was_active=True, owner_token=owner,
+                                   queue_rebuilt=True) is False
+    audits = [row for row in repo.get_audit_for_rule(rule_id)
+              if row["event_type"] == "rule_rescan_recovered"]
+    assert len(audits) == 1
