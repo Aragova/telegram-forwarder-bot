@@ -2364,3 +2364,19 @@ def test_legacy_rescan_is_not_auto_replayed_and_existing_button_can_replace_owne
     assert active is False and token != legacy
     assert repo.get_rule_rescan_operation(rule_id, token)["mode"] == "fresh"
     repo.finish_rule_rescan(rule_id, was_active=False, owner_token=token)
+
+
+def test_durable_rescan_serializes_schedule_and_rejects_pre_lock_confirmation(repo):
+    _, rule_id, _, _, source, target = seed(repo, uuid4().int % 10**10)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET next_run_at=%s WHERE id=%s",
+                        ("2026-11-29T13:00:00+00:00", rule_id))
+    assert repo.issue_rule_rescan_confirmation(rule_id, 1, "before-lock")
+    _, legacy = repo.begin_rule_rescan(rule_id)
+    assert not repo.consume_rule_rescan_confirmation(rule_id, 1, "before-lock")
+    _, owner = repo.begin_rule_rescan(rule_id, actor_id=1,
+                                      expected_scope=(source, None, target, None, "repost"))
+    assert owner != legacy
+    assert repo.get_rule_rescan_operation(rule_id, owner)["old_next_run_at"] == "2026-11-29T13:00:00+00:00"
+    assert repo.finish_rule_rescan(rule_id, was_active=False, owner_token=owner) is False

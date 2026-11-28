@@ -711,41 +711,41 @@ async def _run_rescan_rule_job(
             if operation is None:
                 raise RescanBlocked("Не найдена сохранённая операция пересканирования")
 
+        if operation["phase"] == "rebuilt":
+            # The previous transaction committed, but its response or
+            # owner release was lost. Never create another publication cycle.
+            scan_complete = True
+            await _finish_rule_rescan_with_retry(
+                rule_id, was_active=was_active, owner_token=owner_token, queue_rebuilt=True,
+            )
+            await _write_rescan_audit(rule_id, admin_id, {
+                "event_type": "rule_rescan_recovered", "old_value": None,
+                "new_value": {"mode": operation["mode"], "phase": "rebuilt"},
+                "extra": {"attempt": operation["attempt"]},
+            })
+            invalidate_preview_cache(rule_id)
+            invalidate_rule_card_cache(rule_id)
+            return
+        if operation["phase"] != "scanning":
+            raise RescanBlocked("Неизвестный этап пересканирования")
+
+        if int(operation["attempt"]) > 3:
+            # Claim has established that no rebuild transaction committed.
+            # Do not leave a permanently failing scan in an infinite loop.
+            await _finish_rule_rescan_with_retry(
+                rule_id, was_active=False, owner_token=owner_token, queue_rebuilt=False,
+            )
+            await _write_rescan_audit(rule_id, admin_id, {
+                "event_type": "rule_rescan_recovery_failed", "old_value": None,
+                "new_value": {"mode": operation["mode"], "is_active": False},
+                "extra": {"attempt": operation["attempt"], "reason": "retry_exhausted"},
+            })
+            invalidate_preview_cache(rule_id)
+            invalidate_rule_card_cache(rule_id)
+            logger.error("RESCAN_RECOVERY_EXHAUSTED | rule_id=%s | rule_paused", rule_id)
+            return
+
         async with maintain_rescan_lease(db, run_db, rule_id, owner_token):
-            if operation["phase"] == "rebuilt":
-                # The previous transaction committed, but its response or
-                # owner release was lost. Never create another publication cycle.
-                scan_complete = True
-                await _finish_rule_rescan_with_retry(
-                    rule_id, was_active=was_active, owner_token=owner_token, queue_rebuilt=True,
-                )
-                await _write_rescan_audit(rule_id, admin_id, {
-                    "event_type": "rule_rescan_recovered", "old_value": None,
-                    "new_value": {"mode": operation["mode"], "phase": "rebuilt"},
-                    "extra": {"attempt": operation["attempt"]},
-                })
-                invalidate_preview_cache(rule_id)
-                invalidate_rule_card_cache(rule_id)
-                return
-            if operation["phase"] != "scanning":
-                raise RescanBlocked("Неизвестный этап пересканирования")
-
-            if int(operation["attempt"]) > 3:
-                # Claim has established that no rebuild transaction committed.
-                # Do not leave a permanently failing scan in an infinite loop.
-                await _finish_rule_rescan_with_retry(
-                    rule_id, was_active=False, owner_token=owner_token, queue_rebuilt=False,
-                )
-                await _write_rescan_audit(rule_id, admin_id, {
-                    "event_type": "rule_rescan_recovery_failed", "old_value": None,
-                    "new_value": {"mode": operation["mode"], "is_active": False},
-                    "extra": {"attempt": operation["attempt"], "reason": "retry_exhausted"},
-                })
-                invalidate_preview_cache(rule_id)
-                invalidate_rule_card_cache(rule_id)
-                logger.error("RESCAN_RECOVERY_EXHAUSTED | rule_id=%s | rule_paused", rule_id)
-                return
-
             if rule is None:
                 rule = await run_db(db.get_rule, rule_id)
             scope = tuple(operation["scope"])
@@ -801,9 +801,9 @@ async def _run_rescan_rule_job(
             audit["extra"].update(parsed_count=parsed_count, seen_message_count=len(seen_message_ids),
                                   recovered=recovery)
             await _write_rescan_audit(rule_id, admin_id, audit)
-            was_active = await _finish_rule_rescan_with_retry(
-                rule_id, was_active=was_active, owner_token=owner_token, queue_rebuilt=True,
-            )
+        was_active = await _finish_rule_rescan_with_retry(
+            rule_id, was_active=was_active, owner_token=owner_token, queue_rebuilt=True,
+        )
     except _RescanReleaseFailed:
         if not recovery:
             await _report_rescan_release_failure(rule_id=rule_id, chat_id=chat_id,

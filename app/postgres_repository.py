@@ -4805,7 +4805,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                        SET rescan_confirmation_token=%s, rescan_confirmation_actor=%s,
                            rescan_confirmation_until=NOW() + INTERVAL '15 minutes'
                        WHERE id=%s AND (rescan_owner_token IS NULL OR
-                           (rescan_operation IS NULL AND rescan_lease_until IS NULL))
+                           (rescan_operation IS NULL AND rescan_lease_until IS NULL
+                            AND rescan_started_at IS NOT NULL))
                        RETURNING id""",
                     (str(token), int(actor_id), int(rule_id)),
                 )
@@ -4827,7 +4828,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                          AND rescan_confirmation_actor=%s
                          AND rescan_confirmation_until>NOW()
                          AND (rescan_owner_token IS NULL OR
-                           (rescan_operation IS NULL AND rescan_lease_until IS NULL))
+                           (rescan_operation IS NULL AND rescan_lease_until IS NULL
+                            AND rescan_started_at IS NOT NULL
+                            AND rescan_confirmation_until-INTERVAL '15 minutes'>=rescan_started_at))
                        RETURNING id""",
                     (int(rule_id), str(token), int(actor_id)),
                 )
@@ -4850,7 +4853,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT is_active, rescan_owner_token, source_id, source_thread_id, "
-                    "target_id,target_thread_id,mode,tenant_id,next_run_at,"
+                    "target_id,target_thread_id,mode,tenant_id,next_run_at,rescan_started_at,"
                     "rescan_operation,rescan_lease_until FROM routing WHERE id = %s FOR UPDATE",
                     (int(rule_id),),
                 )
@@ -4861,6 +4864,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     rule["rescan_owner_token"] is not None and actor_id is not None
                     and rule.get("rescan_operation") is None
                     and rule.get("rescan_lease_until") is None
+                    and rule.get("rescan_started_at") is not None
                 )
                 if rule["rescan_owner_token"] is not None and not legacy_owner:
                     raise RescanBlocked(
@@ -4875,7 +4879,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     UPDATE routing
                     SET is_active = FALSE, rescan_owner_token = %s,
                         rescan_started_at = NOW(), rescan_operation=NULL,
-                        rescan_lease_until=NULL
+                        rescan_lease_until=NULL, rescan_confirmation_token=NULL,
+                        rescan_confirmation_actor=NULL,rescan_confirmation_until=NULL
                     WHERE id = %s AND rescan_owner_token IS NOT DISTINCT FROM %s
                     """,
                     (owner_token, int(rule_id), rule["rescan_owner_token"]),
@@ -4927,7 +4932,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         "was_active": was_active, "scope": list(self._rescan_scope(rule)),
                         "tenant_id": rule["tenant_id"], "before_message_id": before,
                         "watermark": int(cur.fetchone()["watermark"]),
-                        "old_next_run_at": rule["next_run_at"],
+                        "old_next_run_at": (str(rule["next_run_at"])
+                                            if rule["next_run_at"] is not None else None),
                     }
                     cur.execute(
                         """UPDATE routing SET rescan_operation=%s::jsonb,

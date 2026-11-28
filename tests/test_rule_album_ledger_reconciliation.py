@@ -1172,3 +1172,51 @@ def test_recovery_keeps_original_cursor_even_after_partial_history_scan():
         94, was_active=True, owner_token="new-owner", queue_rebuilt=True,
     )
     show.assert_not_awaited()
+
+
+def test_rescan_stops_heartbeat_before_finishing_owner():
+    import asyncio
+    import logging
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock, Mock
+    from app.rescan_safety import RescanBlocked
+
+    rule = SimpleNamespace(source_id="-100123", source_thread_id=None,
+                           target_id="-100456", target_thread_id=None, mode="repost")
+    events = []
+
+    @asynccontextmanager
+    async def lease(*args):
+        events.append("heartbeat_started")
+        try:
+            yield
+        finally:
+            events.append("heartbeat_stopped")
+
+    def finish(*args, **kwargs):
+        assert events == ["heartbeat_started", "heartbeat_stopped"]
+        events.append("released")
+        return True
+
+    op = {"mode": "keep", "phase": "scanning", "attempt": 2,
+          "actor_id": 3, "was_active": True,
+          "scope": ["-100123", None, "-100456", None, "repost"],
+          "watermark": 525, "before_message_id": 100, "old_next_run_at": None}
+    repo = SimpleNamespace(claim_interrupted_rule_rescan=Mock(return_value=("owner", op)),
+                           get_rule=Mock(return_value=rule),
+                           rebuild_rule_keep_position=Mock(return_value=(5, 1, 2, 0)),
+                           finish_rule_rescan=Mock(side_effect=finish), log_rule_change=Mock())
+
+    async def run_db(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    handler = _load_rescan_handler("_run_rescan_rule_job", {
+        "asyncio": asyncio, "db": repo, "run_db": run_db, "RescanBlocked": RescanBlocked,
+        "logger": logging.getLogger(__name__), "maintain_rescan_lease": lease,
+        "_scan_rule_source": AsyncMock(return_value=(5, {100})),
+        "_verify_rescan_live_arrivals": AsyncMock(return_value=set()),
+        "cancel_local_rule_delivery_jobs": Mock(), "invalidate_preview_cache": Mock(),
+        "invalidate_rule_card_cache": Mock(),
+    })
+    asyncio.run(handler(rule_id=94, recovery=True))
+    assert events == ["heartbeat_started", "heartbeat_stopped", "released"]
