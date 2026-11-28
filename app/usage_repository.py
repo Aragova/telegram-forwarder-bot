@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from app.repository_models import utc_day_iso
 from app.repository_split_base import RepositorySplitBase
 
 logger = logging.getLogger("forwarder.repository")
@@ -11,7 +12,7 @@ logger = logging.getLogger("forwarder.repository")
 
 class UsageRepository(RepositorySplitBase):
     def bump_usage(self, tenant_id: int, *, jobs_delta: int = 0, video_delta: int = 0, storage_delta_mb: int = 0, api_calls_delta: int = 0) -> None:
-        day = datetime.now(timezone.utc).date().isoformat()
+        day = utc_day_iso()
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -87,21 +88,26 @@ class UsageRepository(RepositorySplitBase):
             "api_calls": int(usage.get("api_calls") or 0),
         }
 
-    def reset_usage_for_day(self, day: str) -> int:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE usage_stats
-                    SET jobs_count = 0,
-                        video_count = 0
-                    WHERE date = %s
-                    """,
-                    (day,),
-                )
-                count = cur.rowcount or 0
-            conn.commit()
-            return int(count)
+    @staticmethod
+    def try_charge_job(cur, tenant_id: int, max_jobs: int) -> bool:
+        """Reserve one daily admission in the caller's transaction.
+
+        The unique tenant/day row serializes concurrent admissions. PostgreSQL
+        rechecks the conflict predicate after waiting for a competing writer.
+        No commit here: a failed enqueue must roll back this reservation.
+        """
+        cur.execute(
+            """
+            INSERT INTO usage_stats(tenant_id, date, jobs_count)
+            VALUES (%s, %s, 1)
+            ON CONFLICT (tenant_id, date) DO UPDATE
+                SET jobs_count = usage_stats.jobs_count + 1
+                WHERE %s <= 0 OR usage_stats.jobs_count < %s
+            RETURNING jobs_count
+            """,
+            (int(tenant_id), utc_day_iso(), int(max_jobs), int(max_jobs)),
+        )
+        return cur.fetchone() is not None
 
     def count_rules_for_tenant(self, tenant_id: int) -> int:
         with self.connect() as conn:

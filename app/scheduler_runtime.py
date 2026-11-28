@@ -62,9 +62,6 @@ def _log_top_time_auto_postponed(repo, *, rule, pause: dict, resume_at: str, nex
             },
         )
 
-_last_usage_reset_day: str | None = None
-
-
 def _video_tenant_throttled(repo, fairness_service, tenant_id, system_mode):
     if hasattr(repo, "get_tenant_heavy_admission_counts"):
         try:
@@ -218,6 +215,12 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
                 duplicate_delivery_id = int(atomic_result.get("delivery_id") or delivery_id)
                 logger.debug("Scheduler пропустил delivery %s (дубликат задачи)", duplicate_delivery_id)
                 continue
+            if result_status == "limit_blocked":
+                logger.warning(
+                    "Scheduler: атомарный допуск отклонён tenant_id=%s: %s",
+                    atomic_result.get("tenant_id", tenant_id), atomic_result.get("reason"),
+                )
+                continue
             if result_status != "created":
                 logger.warning("Ошибка атомарного enqueue delivery_id=%s: неизвестный статус %s", delivery_id, result_status or "none")
                 continue
@@ -273,8 +276,10 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
                 logger.info("Scheduler пропустил дубль задачи для delivery #%s", delivery_id)
                 continue
 
+            # Legacy repositories do not implement the atomic admission contract.
+            await asyncio.to_thread(usage_service.increment_jobs, tenant_id, 1)
+
         created += 1
-        await asyncio.to_thread(usage_service.increment_jobs, tenant_id, 1)
         logger.info("Scheduler атомарно создал задачу job_id=%s для delivery_id=%s", int(job_id), delivery_id)
 
     return {"created": created, "duplicates": duplicates, "checked_rules": checked_rules}
@@ -289,11 +294,6 @@ async def run_scheduler_loop(
     logger.info("Scheduler loop запущен")
     while True:
         try:
-            global _last_usage_reset_day
-            today = datetime.now(timezone.utc).date().isoformat()
-            if _last_usage_reset_day != today:
-                _last_usage_reset_day = today
-                await asyncio.to_thread(UsageService(repo).reset_daily_usage)
             enabled = is_enabled() if is_enabled else True
             await scheduler_tick(repo, enabled=enabled)
         except Exception as exc:

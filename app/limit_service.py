@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.subscription_service import SubscriptionService
+
 
 class LimitExceededError(RuntimeError):
     pass
@@ -37,14 +39,25 @@ class LimitService:
             return False, f"Достигнут лимит правил: {max_rules}"
         return True, None
 
+    @staticmethod
+    def job_limit_for_subscription(sub: dict | None) -> tuple[int | None, str | None]:
+        """Return a daily admission limit (0 = unlimited), or deny admission."""
+        if LimitService._is_unlimited_plan(sub or {}):
+            return 0, None
+        if not SubscriptionService.is_active_snapshot(sub):
+            return None, "Подписка неактивна"
+        return max(0, int((sub or {}).get("max_jobs_per_day") or 0)), None
+
+    def can_execute_admitted_job(self, tenant_id: int) -> tuple[bool, str | None]:
+        """An already admitted delivery uses no additional daily job quota."""
+        limit, reason = self.job_limit_for_subscription(self._get_plan_limits(tenant_id))
+        return limit is not None, reason
+
     def can_enqueue_job(self, tenant_id: int) -> tuple[bool, str | None]:
-        limits = self._get_plan_limits(tenant_id)
-        if self._is_unlimited_plan(limits):
-            return True, None
-        if not self._subscription_service.is_subscription_active(int(tenant_id)):
-            return False, "Подписка неактивна"
-        max_jobs = int(limits.get("max_jobs_per_day") or 0)
-        if max_jobs <= 0:
+        max_jobs, reason = self.job_limit_for_subscription(self._get_plan_limits(tenant_id))
+        if max_jobs is None:
+            return False, reason
+        if max_jobs == 0:
             return True, None
         usage = self._usage_service.get_today_usage(int(tenant_id)) or {}
         jobs_count = int(usage.get("jobs_count") or 0)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.limit_service import LimitService
+from app.repository_models import utc_day_iso
 from app.saas_bootstrap import ensure_owner_and_default_tenant_bootstrap
 from app.subscription_service import SubscriptionService
 from app.usage_service import UsageService
@@ -76,19 +77,12 @@ class _FakeRepo:
         return self.rules_count.get(tenant_id, 0)
 
     def bump_usage(self, tenant_id: int, *, jobs_delta: int = 0, video_delta: int = 0, storage_delta_mb: int = 0, api_calls_delta: int = 0):
-        row = self.usage.setdefault(tenant_id, {"jobs_count": 0, "video_count": 0, "storage_used_mb": 0, "api_calls": 0})
+        row = self.usage.setdefault((tenant_id, utc_day_iso()), {"jobs_count": 0, "video_count": 0, "storage_used_mb": 0, "api_calls": 0})
         row["jobs_count"] += jobs_delta
         row["video_count"] += video_delta
 
     def get_usage_for_date(self, tenant_id: int, day: str):
-        return self.usage.get(tenant_id, {"jobs_count": 0, "video_count": 0, "storage_used_mb": 0, "api_calls": 0})
-
-    def reset_usage_for_day(self, day: str):
-        for row in self.usage.values():
-            row["jobs_count"] = 0
-            row["video_count"] = 0
-        return len(self.usage)
-
+        return self.usage.get((tenant_id, day), {"jobs_count": 0, "video_count": 0, "storage_used_mb": 0, "api_calls": 0})
 
 def test_owner_tenant_is_created_automatically():
     repo = _FakeRepo()
@@ -143,17 +137,35 @@ def test_regular_tenant_without_active_subscription_is_still_blocked():
     assert limit.can_process_video(300)[0] is False
 
 
-def test_usage_increment_and_reset():
+def test_usage_rollover_preserves_previous_utc_day(monkeypatch):
+    import app.usage_service as usage_module
+
     repo = _FakeRepo()
     usage = UsageService(repo)
-
+    day = "2026-11-28"
+    monkeypatch.setattr(usage_module, "utc_day_iso", lambda: day)
+    monkeypatch.setitem(globals(), "utc_day_iso", lambda: day)
     usage.increment_jobs(7)
     usage.increment_video(7)
-    today = usage.get_today_usage(7)
-    assert today["jobs_count"] == 1
-    assert today["video_count"] == 1
+    assert usage.get_today_usage(7)["jobs_count"] == 1
+    assert usage.get_today_usage(7)["video_count"] == 1
 
-    usage.reset_daily_usage()
-    today_after = usage.get_today_usage(7)
-    assert today_after["jobs_count"] == 0
-    assert today_after["video_count"] == 0
+    day = "2026-11-29"
+    assert usage.get_today_usage(7)["jobs_count"] == 0
+    assert usage.get_today_usage(7)["video_count"] == 0
+    usage.increment_jobs(7)
+    assert repo.get_usage_for_date(7, "2026-11-28")["jobs_count"] == 1
+    assert repo.get_usage_for_date(7, "2026-11-28")["video_count"] == 1
+    assert usage.get_today_usage(7)["jobs_count"] == 1
+
+
+def test_last_admitted_job_can_execute_but_new_job_is_blocked():
+    repo = _FakeRepo()
+    SubscriptionService(repo).assign_plan(7, "FREE")
+    usage = UsageService(repo)
+    limits = LimitService(repo, SubscriptionService(repo), usage)
+    usage.increment_jobs(7, 2)
+    assert limits.can_enqueue_job(7)[0] is False
+    assert limits.can_execute_admitted_job(7) == (True, None)
+    repo.expire_subscription(7)
+    assert limits.can_execute_admitted_job(7)[0] is False

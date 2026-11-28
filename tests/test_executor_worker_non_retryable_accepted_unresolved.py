@@ -298,7 +298,7 @@ def test_worker_reconciles_exact_legacy_album_receipt_before_billing_gate(
                "target_peer_id": -100123, "target_thread_id": None, **receipt_changes}
     repo.get_publication_receipt = Mock(side_effect=lambda key: receipt if key == legacy_key else None)
     billing = Mock(return_value=(False, "Подписка неактивна"))
-    monkeypatch.setattr(worker_runtime.LimitService, "can_enqueue_job", billing)
+    monkeypatch.setattr(worker_runtime.LimitService, "can_execute_admitted_job", billing)
     reconcile = AsyncMock(return_value={"ok": True, "accepted": True, "sent_message_ids": [501, 502]})
     monkeypatch.setattr(worker_runtime, "reconcile_pending_publication", reconcile)
     job = {"id": 15, "job_type": "repost_album", "payload_json": payload, "attempts": 0, "max_attempts": 3}

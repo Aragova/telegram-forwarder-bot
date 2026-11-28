@@ -30,6 +30,7 @@ from app.subscription_repository import SubscriptionRepository
 from app.billing_repository import BillingRepository
 from app.payment_repository import PaymentRepository
 from app.usage_repository import UsageRepository
+from app.limit_service import LimitService
 from app.tenant_fairness_service import TenantFairnessService
 from app.job_service import (
     JOB_PRIORITY_BY_TYPE,
@@ -6560,6 +6561,19 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         "dedup_key": dedup_key,
                     }
 
+                # Recheck the actual selected tenant's subscription and reserve
+                # quota in the same transaction as the job and its deliveries.
+                subscription = self.subscription_repo.get_active_subscription_row(cur, tenant_id, lock=True)
+                max_jobs, blocked_reason = LimitService.job_limit_for_subscription(subscription)
+                if max_jobs is None or not self.usage_repo.try_charge_job(cur, tenant_id, max_jobs):
+                    conn.rollback()
+                    return {
+                        "status": "limit_blocked",
+                        "delivery_id": delivery_id,
+                        "tenant_id": tenant_id,
+                        "reason": blocked_reason or f"Достигнут дневной лимит задач: {max_jobs}",
+                    }
+
                 try:
                     cur.execute(
                         """
@@ -6586,6 +6600,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         "tenant_id": tenant_id,
                         "dedup_key": dedup_key,
                     }
+
+                if not job_row:
+                    conn.rollback()
+                    return None
 
                 cur.executemany(
                     """
@@ -10123,9 +10141,6 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
     def build_billing_usage_data(self, tenant_id: int, period_start: str, period_end: str) -> dict[str, Any]:
         return self.usage_repo.build_billing_usage_data(tenant_id=tenant_id, period_start=period_start, period_end=period_end)
-
-    def reset_usage_for_day(self, day: str) -> int:
-        return self.usage_repo.reset_usage_for_day(day=day)
 
     def add_subscription_history(
         self,
