@@ -298,8 +298,8 @@ def test_bot_polling_preserves_session_until_campaign_shutdown():
     assert session_options[0].value is False
 
 
-@pytest.mark.parametrize("with_publication_flush", [False, True])
-def test_shutdown_requests_completion_before_closing_telegram_clients(with_publication_flush):
+@pytest.mark.parametrize("with_publication_flush,stop_workers", [(False, False), (True, False), (True, True)])
+def test_shutdown_requests_completion_before_closing_telegram_clients(with_publication_flush, stop_workers):
     import ast
     from pathlib import Path
     from app.runtime_utils import wait_for_db_task
@@ -315,12 +315,19 @@ def test_shutdown_requests_completion_before_closing_telegram_clients(with_publi
     )
     events = []
     flushed = asyncio.Event()
+    campaign_stopped = asyncio.Event()
+
+    async def drain_workers(*, wait_until_complete):
+        assert wait_until_complete is True
+        await asyncio.wait_for(flushed.wait(), timeout=2)
+        events.append("workers_cleanup")
 
     async def drain_campaign(*, wait_until_complete):
         assert wait_until_complete is True
         if with_publication_flush:
             await asyncio.wait_for(flushed.wait(), timeout=2)
         events.append("campaign_stop")
+        campaign_stopped.set()
         assert "telethon_disconnect" not in events
         assert "bot_session_close" not in events
 
@@ -330,6 +337,9 @@ def test_shutdown_requests_completion_before_closing_telegram_clients(with_publi
     async def flush():
         events.append("publication_flush")
         flushed.set()
+        if stop_workers:
+            # The first flush cannot finish until campaigns start stopping.
+            await asyncio.wait_for(campaign_stopped.wait(), timeout=2)
 
     campaign = SimpleNamespace(stop=drain_campaign)
     raw_telethon = SimpleNamespace(disconnect=lambda: record("telethon_disconnect"))
@@ -341,7 +351,7 @@ def test_shutdown_requests_completion_before_closing_telegram_clients(with_publi
         "__name__": "test.shutdown",
         "asyncio": asyncio, "logger": logging.getLogger("test.shutdown.drain"),
         "stop_background_tasks": lambda: record("background_cleanup"),
-        "stop_job_workers_runtime": lambda: record("workers_cleanup"),
+        "stop_job_workers_runtime": drain_workers,
         "runtime_ownership": SimpleNamespace(begin_shutdown=lambda: None),
         "stop_all_workers": lambda: record("all_workers_cleanup"),
         "dashboard_tasks": {},
@@ -366,11 +376,13 @@ def test_shutdown_requests_completion_before_closing_telegram_clients(with_publi
     module = ast.fix_missing_locations(ast.Module(body=[drain_helper, fn], type_ignores=[]))
     exec(compile(module, "bot.py", "exec"), ctx)
     result = asyncio.run(ctx["_shutdown_runtime"](
-        stop_workers_runtime=False, close_dashboard_tasks=True,
+        stop_workers_runtime=stop_workers, close_dashboard_tasks=True,
         close_telegram_clients=True, close_bot_session=True,
     ))
     assert result is True
     assert events.count("campaign_stop") == 1
+    if stop_workers:
+        assert events.index("workers_cleanup") < events.index("campaign_stop")
     if with_publication_flush:
         assert events.index("publication_flush") < events.index("campaign_stop")
         assert events.count("publication_flush") >= 2

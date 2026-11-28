@@ -95,3 +95,59 @@ def test_recovery_stop_event_wakes_supervisor_without_waiting_for_period():
         ns["run_db"].assert_awaited_once()
 
     asyncio.run(scenario())
+
+
+def test_rebuilt_recovery_runs_while_history_is_still_reading():
+    import ast
+    import logging
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    source = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    fn = next(n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
+              and n.name == "_rescan_recovery_loop")
+
+    async def scenario():
+        stop = asyncio.Event()
+        scanning = asyncio.Event()
+        released = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def read(func, *, phase, **kwargs):
+            if phase == "rebuilt":
+                return [2] if scanning.is_set() else []
+            return [1]
+
+        async def job(*, rule_id, recovery, recovery_phase):
+            assert recovery
+            if recovery_phase == "scanning":
+                assert rule_id == 1
+                scanning.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+            else:
+                assert rule_id == 2 and scanning.is_set() and not cancelled.is_set()
+                released.set()
+                stop.set()
+
+        async def wait_for(awaitable, *, timeout):
+            awaitable.close()
+            await asyncio.sleep(0)
+            if not stop.is_set():
+                raise TimeoutError
+
+        ns = {"asyncio": SimpleNamespace(gather=asyncio.gather, wait_for=wait_for,
+                                         Event=asyncio.Event),
+              "runtime_ownership": SimpleNamespace(can_poll=True),
+              "db": SimpleNamespace(list_expired_rule_rescans=Mock()),
+              "run_db": read, "logger": logging.getLogger(__name__),
+              "rescan_recovery_job": None, "_run_rescan_rule_job": job,
+              "create_background_task": asyncio.create_task}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), "bot.py", "exec"), ns)
+        await asyncio.wait_for(ns["_rescan_recovery_loop"](stop), timeout=2)
+        assert released.is_set() and cancelled.is_set()
+        assert ns["rescan_recovery_job"] is None
+
+    asyncio.run(scenario())

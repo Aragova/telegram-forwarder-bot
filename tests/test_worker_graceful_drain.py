@@ -123,7 +123,7 @@ def test_all_role_keeps_bot_session_open_until_after_worker_drain():
     shutdown_start = source.index("async def _shutdown_runtime(")
     shutdown_end = source.index("async def _run_scheduler_role_loop()", shutdown_start)
     shutdown = source[shutdown_start:shutdown_end]
-    assert shutdown.index("lambda: stop_job_workers_runtime(wait_until_complete=True)") < shutdown.index("await bot.session.close()")
+    assert shutdown.index("await stop_job_workers_runtime(wait_until_complete=True)") < shutdown.index("await bot.session.close()")
 
 
 
@@ -216,9 +216,9 @@ def test_shutdown_stops_scheduler_and_rescan_before_draining_workers():
     source = Path("bot.py").read_text(encoding="utf-8")
     shutdown = source[source.index("async def _shutdown_runtime("):
                       source.index("async def _run_scheduler_role_loop()")]
-    assert shutdown.index("await asyncio.gather(scheduler_runtime_task") < shutdown.index("lambda: stop_job_workers_runtime(wait_until_complete=True)")
-    assert shutdown.index("await asyncio.gather(rescan_recovery_task") < shutdown.index("lambda: stop_job_workers_runtime(wait_until_complete=True)")
-    assert shutdown.index("lambda: stop_job_workers_runtime(wait_until_complete=True)") < shutdown.index("await raw_telethon.disconnect()")
+    assert shutdown.index("await asyncio.gather(scheduler_runtime_task") < shutdown.index("await stop_job_workers_runtime(wait_until_complete=True)")
+    assert shutdown.index("await asyncio.gather(rescan_recovery_task") < shutdown.index("await stop_job_workers_runtime(wait_until_complete=True)")
+    assert shutdown.index("await stop_job_workers_runtime(wait_until_complete=True)") < shutdown.index("await raw_telethon.disconnect()")
 
 
 def test_shutdown_job_lifecycle_joins_pending_cleanup_without_recancelling(monkeypatch):

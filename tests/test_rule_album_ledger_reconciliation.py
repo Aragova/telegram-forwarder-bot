@@ -769,7 +769,7 @@ def test_rescan_final_screen_uses_send_when_edit_cannot_succeed():
     send.assert_awaited_once_with(chat_id=1, text="Готово", reply_markup=None, parse_mode=None)
 
 
-@pytest.mark.parametrize("release", ["ok", "retry", "failed", "unknown"])
+@pytest.mark.parametrize("release", ["ok", "retry", "failed", "unknown", "blocked"])
 def test_fresh_restart_reports_success_even_when_card_refresh_fails(release):
     import asyncio
     import logging
@@ -782,7 +782,8 @@ def test_fresh_restart_reports_success_even_when_card_refresh_fails(release):
                            schedule_mode="interval")
     repo = SimpleNamespace(restart_rule_queue=Mock(
                                return_value=(240, 525, 530),
-                               side_effect=RuntimeError("lost commit response") if release == "unknown" else None),
+                               side_effect=(RuntimeError("lost commit response") if release == "unknown" else
+                                            RescanBlocked("Появились новые записи") if release == "blocked" else None)),
                            log_rule_change=Mock(), get_rule=Mock(return_value=rule),
                            begin_rule_rescan=Mock(return_value=(True, "owner")),
                            get_rule_rescan_operation=Mock(return_value={
@@ -795,7 +796,7 @@ def test_fresh_restart_reports_success_even_when_card_refresh_fails(release):
                                "ok": None,
                                "retry": [RuntimeError("connection"), None],
                                "failed": RuntimeError("connection"),
-                               "unknown": None,
+                               "unknown": None, "blocked": None,
                            }[release]))
     scan = AsyncMock(return_value=(5, set(range(1, 531))))
 
@@ -829,6 +830,12 @@ def test_fresh_restart_reports_success_even_when_card_refresh_fails(release):
         include_newer_than_message_id=525, checked_missing_message_ids=set(),
         expected_scope=("-100123", None, "-100456", None, "repost"),
     )
+    if release == "blocked":
+        repo.finish_rule_rescan.assert_not_called()
+        repo.log_rule_change.assert_not_called()
+        assert "Появились новые записи" in show.await_args.kwargs["text"]
+        assert "неизвестен" not in show.await_args.kwargs["text"]
+        return
     if release == "unknown":
         repo.finish_rule_rescan.assert_not_called()
         repo.log_rule_change.assert_not_called()
