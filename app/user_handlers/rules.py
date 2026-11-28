@@ -5,6 +5,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from .context import UserHandlersContext
 from app import user_ui
+from app.keyboards import format_rule_channel_choice
 from app.rule_folders_ui import root_view, additional_functions_view, rule_catalog_view
 from app.rule_catalog import RulePage
 from app.rich_rule_buttons import (
@@ -198,7 +199,7 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             return
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text=f"📤 {i}. {s.title}{f' (тема {s.thread_id})' if s.thread_id else ''}", callback_data=f"user_rule_pick_source:{i - 1}")]
+                [InlineKeyboardButton(text=f"📤 {i}. {format_rule_channel_choice(s.title, s.thread_id)}", callback_data=f"user_rule_pick_source:{i - 1}")]
                 for i, s in enumerate(sources, 1)
             ]
             + [
