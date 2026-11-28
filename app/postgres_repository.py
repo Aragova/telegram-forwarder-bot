@@ -1934,6 +1934,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             AND a.idempotency_key NOT LIKE '%%:rescan:%%'
         """
 
+    @staticmethod
+    def _active_timed_cooldown_predicate() -> str:
+        # Non-expiring video-emoji write fences are not timed restrictions.
+        return "blocked_until > NOW() AND isfinite(blocked_until)"
+
     def get_diagnostics_center_snapshot(self, *, older_than_seconds: int) -> dict[str, int]:
         """Exact, read-only counts; use the recovery predicates, not job age."""
         stale = self._stale_delivery_job_predicate()
@@ -1941,6 +1946,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         orphan = self._orphaned_processing_rule_predicate()
         unresolved = self._unresolved_publication_predicate()
         faulty = self._uncleared_faulty_predicate()
+        timed_cooldown = self._active_timed_cooldown_predicate()
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(f"""
@@ -1957,7 +1963,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         JOIN delivery_attempts a ON a.idempotency_key=pr.idempotency_key
                         JOIN routing r ON r.id=pr.rule_id WHERE {unresolved}) AS receipts,
                       (SELECT COUNT(*) FROM telegram_transport_cooldowns
-                        WHERE blocked_until > NOW()) AS cooldowns
+                        WHERE {timed_cooldown}) AS cooldowns
                     """, (max(600, int(older_than_seconds)), sorted(DELIVERY_JOB_TYPES)))
                 return {key: int(value) for key, value in cur.fetchone().items()}
 
@@ -1980,10 +1986,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         ORDER BY pr.deadline_at, pr.idempotency_key LIMIT %s OFFSET %s
                     """, (limit, offset))
                 elif category == "cooldowns":
-                    cur.execute("""
+                    timed_cooldown = self._active_timed_cooldown_predicate()
+                    cur.execute(f"""
                         SELECT scope_key, blocked_until,
-                            CEIL(EXTRACT(EPOCH FROM (blocked_until-NOW())))::integer AS seconds
-                        FROM telegram_transport_cooldowns WHERE blocked_until>NOW()
+                            CASE WHEN isfinite(blocked_until)
+                                 THEN CEIL(EXTRACT(EPOCH FROM (blocked_until-NOW())))::bigint
+                            END AS seconds
+                        FROM telegram_transport_cooldowns WHERE {timed_cooldown}
                         ORDER BY blocked_until, scope_key LIMIT %s OFFSET %s
                     """, (limit, offset))
                 else:
@@ -10578,7 +10587,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         filters = {
             "all": "TRUE",
             "errors": "status IN ('failed','faulty') OR (error_text IS NOT NULL AND error_text<>'' AND status IS DISTINCT FROM 'cleared' AND status IS DISTINCT FROM 'skipped')",
-            "publications": "event_type IN ('delivery_started','delivery_sent','delivery_failed','delivery_process_exception','delivery_rolled_back')",
+            "publications": "event_type IN ('delivery_started','delivery_sent','delivery_failed','delivery_process_exception','delivery_rolled_back','delivery_pipeline_step','delivery_caption_mode_selected')",
             "admin": "admin_id IS NOT NULL",
         }
         if category not in filters:

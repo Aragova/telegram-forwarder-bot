@@ -2080,3 +2080,53 @@ def test_diagnostics_journal_filters_before_limit_and_cooldown_is_active(repo):
     assert active in scopes and expired not in scopes
     with pytest.raises(ValueError):
         repo.get_recent_audit(category="invalid")
+
+
+def test_diagnostics_timed_cooldowns_exclude_fence_keep_quotas_and_long_limits(repo):
+    account = uuid4().int % 10**12 + 1
+    user = account + 1
+    fence = f"video-emoji:{account}:inflight"
+    account_quota = f"video-emoji:{account}:quota"
+    user_quota = f"video-emoji:{account}:user:{user}:quota"
+    long_limit = f"mtproto:{account}"
+    expired = f"bot:{account}"
+    scopes = [fence, account_quota, user_quota, long_limit, expired]
+    baseline = repo.get_diagnostics_center_snapshot(older_than_seconds=900)["cooldowns"]
+    try:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO telegram_transport_cooldowns(scope_key,blocked_until)
+                    VALUES (%s,'infinity'::timestamptz), (%s,NOW()+INTERVAL '1 hour'),
+                           (%s,NOW()+INTERVAL '1 hour'), (%s,NOW()+INTERVAL '100 years'),
+                           (%s,NOW()-INTERVAL '1 second')
+                """, tuple(scopes))
+        count = repo.get_diagnostics_center_snapshot(older_than_seconds=900)["cooldowns"]
+        assert count == baseline + 3
+        visible = {row["scope_key"]: row["seconds"] for offset in range(0, count, 10)
+                   for row in repo.get_diagnostics_review_rows("cooldowns", offset=offset)}
+        assert fence not in visible and expired not in visible
+        assert account_quota in visible and user_quota in visible
+        assert visible[long_limit] > 2**31
+        assert repo.reserve_video_emoji_check(account, user, -100123) == "pending_review"
+    finally:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM telegram_transport_cooldowns WHERE scope_key=ANY(%s)", (scopes,))
+
+
+def test_diagnostics_publication_filter_includes_pipeline_and_caption_events(repo):
+    marker = str(uuid4())
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO audit_log(created_at,event_type,status,error_text)
+                VALUES (NOW(),'delivery_pipeline_step','processing',%s),
+                       (NOW(),'delivery_caption_mode_selected','processing',%s),
+                       (NOW(),'rule_enabled','ok',%s)
+            """, (marker, marker, marker))
+    rows = repo.get_recent_audit(limit=2, category="publications")
+    assert [row["event_type"] for row in rows] == [
+        "delivery_caption_mode_selected", "delivery_pipeline_step",
+    ]
+    assert all(row["error_text"] == marker for row in rows)

@@ -197,3 +197,49 @@ def test_center_uses_exact_counts_and_fail_closed_unknown():
     assert kb.inline_keyboard[0][0].callback_data == "rule_card:169"
     detail, _ = _review_payload("cooldowns", [dict(scope_key="SECRET_TOKEN", seconds=120)], 0)
     assert "SECRET_TOKEN" not in detail
+
+
+def test_timed_restrictions_distinguish_emoji_quota_and_mask_unknown_scope():
+    from app.admin_handlers.diagnostics import _review_payload
+    text, _ = _review_payload("cooldowns", [
+        dict(scope_key="mtproto:123:-100456", seconds=120),
+        dict(scope_key="video-emoji:123:quota", seconds=60),
+        dict(scope_key="video-emoji:123:user:456:quota", seconds=120),
+        dict(scope_key="untrusted-secret", seconds=60),
+    ], 0)
+    assert "Telegram: mtproto:123:-100456" in text
+    assert text.count("Квота проверки эмодзи (не лимит Telegram)") == 2
+    assert "untrusted-secret" not in text
+
+
+def test_diagnostic_db_failure_preserves_retry_and_back_navigation():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from aiogram import Dispatcher
+    from app.admin_handlers.diagnostics import register_admin_diagnostics_handlers
+
+    dp = Dispatcher()
+    ctx = SimpleNamespace(
+        is_admin_callback=AsyncMock(return_value=True),
+        answer_callback_safe_once=AsyncMock(),
+        run_db=AsyncMock(side_effect=RuntimeError("private-db-error")),
+        edit_message_text_safe=AsyncMock(),
+        logger=Mock(),
+        db=SimpleNamespace(get_stuck_processing_deliveries=Mock(),
+                           get_diagnostics_review_rows=Mock()),
+    )
+    register_admin_diagnostics_handlers(dp, ctx)
+    handlers = {handler.callback.__name__: handler.callback for handler in dp.callback_query.handlers}
+    for name, callback_data in (("handle_center_stale", "diag_stale"),
+                                ("handle_center_review", "diag_review:cooldowns:10"),
+                                ("handle_center_review", "diag_review:receipts:0")):
+        callback = SimpleNamespace(data=callback_data, message=object())
+        asyncio.run(handlers[name](callback))
+        kwargs = ctx.edit_message_text_safe.call_args.kwargs
+        assert "Данные недоступны" in kwargs["text"]
+        assert "private-db-error" not in kwargs["text"]
+        assert [button.callback_data for row in kwargs["reply_markup"].inline_keyboard
+                for button in row] == [callback_data, "diag_center"]
+    assert ctx.run_db.await_count == 3
+    assert "private-db-error" not in str(ctx.logger.warning.call_args_list)

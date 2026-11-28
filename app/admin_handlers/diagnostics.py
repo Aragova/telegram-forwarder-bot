@@ -64,10 +64,15 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         await ctx.edit_message_text_safe(message=callback.message, text=text, parse_mode="HTML", reply_markup=markup)
 
     async def stale_payload():
-        rows = await ctx.run_db(
-            ctx.db.get_stuck_processing_deliveries,
-            older_than_seconds=DeliveryObservabilityConfig().stale_processing_after_seconds, limit=50,
-        )
+        try:
+            rows = await ctx.run_db(
+                ctx.db.get_stuck_processing_deliveries,
+                older_than_seconds=DeliveryObservabilityConfig().stale_processing_after_seconds, limit=50,
+            )
+        except Exception as exc:
+            ctx.logger.warning("Диагностика зависших заданий: %s | %s",
+                               type(exc).__name__, _safe_quarantine_traceback(exc))
+            return _diagnostic_unavailable_payload("diag_stale")
         return _format_stuck_processing_deliveries_text(rows), _build_stuck_processing_keyboard(rows)
 
     @dp.callback_query(lambda c: c.data == "diag_stale")
@@ -91,8 +96,14 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback)
-        rows = await ctx.run_db(ctx.db.get_diagnostics_review_rows, category, limit=10, offset=offset)
-        text, markup = _review_payload(category, rows, offset)
+        try:
+            rows = await ctx.run_db(ctx.db.get_diagnostics_review_rows, category, limit=10, offset=offset)
+        except Exception as exc:
+            ctx.logger.warning("Диагностика %s: %s | %s", category,
+                               type(exc).__name__, _safe_quarantine_traceback(exc))
+            text, markup = _diagnostic_unavailable_payload(f"diag_review:{category}:{offset}")
+        else:
+            text, markup = _review_payload(category, rows, offset)
         await ctx.edit_message_text_safe(message=callback.message, text=text, parse_mode="HTML", reply_markup=markup)
 
 
@@ -407,13 +418,19 @@ def _back_to_center():
     ])
 
 
+def _diagnostic_unavailable_payload(refresh_callback):
+    buttons = [[InlineKeyboardButton(text="🔄 Обновить", callback_data=refresh_callback)]]
+    buttons.extend(_back_to_center().inline_keyboard)
+    return "⚪ <b>Данные недоступны</b>\n\nНе удалось получить данные. Попробуйте обновить.", InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 def _center_payload(counts):
     labels = (
         ("⚠️ Проблемные доставки", "faulty", "faulty_page:0"),
         ("🧯 Зависшие задания", "stale_jobs", "diag_stale"),
         ("🔧 Правила без задания", "orphan_rules", "stuck_orphan_page:0"),
         ("🔎 Неподтверждённые публикации", "receipts", "diag_review:receipts:0"),
-        ("⏳ Активные ограничения Telegram", "cooldowns", "diag_review:cooldowns:0"),
+        ("⏳ Активные ограничения", "cooldowns", "diag_review:cooldowns:0"),
     )
     lines = ["<b>⚠️ ЦЕНТР ОШИБОК</b>", ""]
     buttons = []
@@ -428,7 +445,7 @@ def _center_payload(counts):
         buttons.append([InlineKeyboardButton(text=f"{title} ({value})", callback_data=callback)])
     lines.extend(["", "Доставки считаются по записям (список последних 200), задания — по ID.",
                   "Доставки без задания сгруппированы по правилам.",
-                  "Ограничения — по активным областям Telegram; не число задержанных постов."])
+                  "Ограничения — временные лимиты Telegram и квоты проверок эмодзи; не число задержанных постов."])
     buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="diag_center")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -450,7 +467,7 @@ def _parse_journal_callback(data):
 
 def _review_payload(category, rows, offset):
     receipt = category == "receipts"
-    lines = ["<b>🔎 Неподтверждённые публикации</b>" if receipt else "<b>⏳ Ограничения Telegram</b>", ""]
+    lines = ["<b>🔎 Неподтверждённые публикации</b>" if receipt else "<b>⏳ Активные ограничения</b>", ""]
     buttons = []
     if not rows:
         lines.append("Записей на этой странице нет.")
@@ -464,7 +481,12 @@ def _review_payload(category, rows, offset):
         else:
             # Scope keys must not expose arbitrary secret-bearing strings.
             scope = str(row["scope_key"])
-            label = scope if re.fullmatch(r"(?:mtproto|bot):\d+(?::-?\d+)?", scope) else "Другая область"
+            if re.fullmatch(r"(?:mtproto|bot):\d+(?::-?\d+)?", scope):
+                label = f"Telegram: {scope}"
+            elif re.fullmatch(r"video-emoji:\d+(?::user:\d+)?:quota", scope):
+                label = "Квота проверки эмодзи (не лимит Telegram)"
+            else:
+                label = "Другая область"
             lines.append(f"• {escape(label)} — <b>{_duration_ru(row['seconds'])}</b>")
     lines.extend(["", "Не отправляйте повторно без сверки с получателем." if receipt else "Ограничение снимается автоматически по истечении срока."])
     nav = []
