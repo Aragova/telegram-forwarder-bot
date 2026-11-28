@@ -90,3 +90,16 @@ def test_finance_back_restores_main_menu():
     ctx.is_admin_callback.return_value = False
     asyncio.run(back(SimpleNamespace(from_user=message.from_user, message=message)))
     assert ctx.send_message_safe.await_count == 2
+
+
+def test_finance_filter_accepts_new_and_legacy_buttons_but_not_nontext():
+    dp = Dispatcher()
+    register_admin_system_handlers(dp, SimpleNamespace())
+    handler = next(h for h in dp.message.handlers
+                   if h.callback.__name__ == "handle_billing_home")
+    predicate = handler.filters[0].callback
+    for value in (None, "", " ", "📦 Очередь", "⚙️ Система"):
+        assert not predicate(SimpleNamespace(text=value))
+    for value in ("💳 Финансы", "💳 Биллинг и тарифы", " 💳 Финансы ",
+                  "💳\ufe0f Финансы"):
+        assert predicate(SimpleNamespace(text=value))

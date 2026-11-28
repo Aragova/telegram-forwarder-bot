@@ -143,7 +143,7 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             ctx.reset_user_state(message.from_user.id)
         await ctx.send_message_safe(chat_id=message.chat.id, text="⚙️ Раздел: Система", reply_markup=ctx.get_system_menu())
 
-    @dp.message(lambda m: _normalize_button_text(m.text) in {"💳 Финансы", "💳 Биллинг и тарифы"})
+    @dp.message(lambda m: m.text is not None and _normalize_button_text(m.text) in {"💳 Финансы", "💳 Биллинг и тарифы"})
     async def handle_billing_home(message: Message):
         if not await ctx.is_admin(message):
             return
