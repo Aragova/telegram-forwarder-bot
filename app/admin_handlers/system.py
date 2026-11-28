@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from math import isfinite
 from html import escape
+from typing import Any, Callable
 
 from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -37,6 +38,12 @@ BILLING_HOME_TEXT = (
     "💎 <b>BASIC</b>\n🚀 <b>PRO</b>\n\n"
     "USD и курсы валют, отдельные фиксированные цены Stars и Crypto."
 )
+
+
+async def show_billing_home(message: Message, *, send_message_safe: Callable[..., Any]) -> None:
+    """Render the shared finance screen after the caller authorizes navigation."""
+    await send_message_safe(chat_id=message.chat.id, text=BILLING_HOME_TEXT,
+                            parse_mode="HTML", reply_markup=_billing_home_kb())
 
 
 class _FixedPriceSnapshot:
@@ -149,8 +156,7 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             return
         if message.from_user:
             ctx.reset_user_state(message.from_user.id)
-        await ctx.send_message_safe(chat_id=message.chat.id, text=BILLING_HOME_TEXT,
-                                    parse_mode="HTML", reply_markup=_billing_home_kb())
+        await show_billing_home(message, send_message_safe=ctx.send_message_safe)
 
     @dp.callback_query(lambda c: c.data in {"admin_billing_home", "admin_billing_rates_back",
                                             "admin_billing_usd_back", "admin_fixed_prices_back"})

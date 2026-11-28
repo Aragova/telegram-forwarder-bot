@@ -140,6 +140,7 @@ from app.user_handlers import (
 
 from app.intro_handlers import IntroHandlersContext, register_intro_handlers
 
+from app.admin_handlers.system import show_billing_home
 from app.admin_handlers import (
     AdminHandlersContext,
     register_admin_menu_handlers,
@@ -273,6 +274,8 @@ ADMIN_REPLY_KEYBOARD_ALIASES = {
     "📈 Живой статус": "📈 Живой статус",
     "🔄 Правила": "🔄 Правила",
     "📡 Каналы": "📡 Каналы",
+    "💳 Финансы": "💳 Финансы",
+    "💳 Биллинг и тарифы": "💳 Финансы",
     # Old keyboards must never fall through to stateful inputs or bulk reset.
     "📦 Очередь": "📋 Меню",
     "📋 Очередь": "📋 Меню",
@@ -3000,6 +3003,9 @@ async def handle_admin_reply_keyboard_router(message: Message):
         return
     if canonical == "📡 Каналы":
         await reply_message_safe(message, "📡 Раздел: Каналы", reply_markup=get_channels_menu())
+        return
+    if canonical == "💳 Финансы":
+        await show_billing_home(message, send_message_safe=send_message_safe)
         return
     if canonical == "⚠️ Диагностика":
         await reply_message_safe(message, "⚠️ Раздел: Диагностика", reply_markup=get_diagnostics_menu())
