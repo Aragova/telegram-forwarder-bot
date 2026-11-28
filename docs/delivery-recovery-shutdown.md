@@ -76,7 +76,8 @@ Fresh создаёт новый цикл всех исходных публик�
 статусы в pending для прохождения сверки.
 
 
-The subsequent P0.12/P0.9 changes join scheduler admission before draining
-workers, cancel and join rescan tasks with a durable recovery record, and
-retry incomplete worker/campaign drains without returning from main.
+The subsequent P0.12/P0.9 changes signal scheduler and rescan admission to stop
+before joining producers and draining workers/campaigns concurrently. Volatile
+publication evidence is persisted during these joins. All in-flight work is
+joined before closing clients; durable replay may resume on next startup.
 See [durable rescan and shutdown](durable-rescan-shutdown.md).
