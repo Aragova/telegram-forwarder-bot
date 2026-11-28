@@ -154,3 +154,66 @@ def test_rebuilt_recovery_runs_while_history_is_still_reading():
         assert ns["rescan_recovery_job"] is None
 
     asyncio.run(scenario())
+
+
+def test_heartbeat_exits_when_in_flight_renewal_fails_during_context_exit(monkeypatch):
+    from app import rescan_runtime
+
+    monkeypatch.setattr(rescan_runtime, "_HEARTBEAT_INTERVAL_SEC", 0.001)
+
+    async def scenario():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        leaving = asyncio.Event()
+        calls = 0
+
+        async def run_db(func, *args):
+            nonlocal calls
+            calls += 1
+            entered.set()
+            await release.wait()
+            raise RuntimeError("database connection lost")
+
+        async def owner():
+            async with rescan_runtime.maintain_rescan_lease(Mock(), run_db, 94, "owner"):
+                await entered.wait()
+                leaving.set()
+
+        task = asyncio.create_task(owner())
+        try:
+            await asyncio.wait_for(leaving.wait(), timeout=1)
+            assert not task.done()
+            release.set()
+            await asyncio.wait_for(asyncio.shield(task), timeout=1)
+            assert calls == 1
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_heartbeat_retries_transient_failure_while_context_active(monkeypatch):
+    from app import rescan_runtime
+
+    monkeypatch.setattr(rescan_runtime, "_HEARTBEAT_INTERVAL_SEC", 0.001)
+
+    async def scenario():
+        recovered = asyncio.Event()
+        calls = 0
+
+        async def run_db(func, *args):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("temporary error")
+            recovered.set()
+            return True
+
+        async with rescan_runtime.maintain_rescan_lease(Mock(), run_db, 94, "owner"):
+            await asyncio.wait_for(recovered.wait(), timeout=1)
+        assert calls >= 2
+
+    asyncio.run(scenario())
