@@ -30,8 +30,9 @@ class _FakeCursor:
         q = " ".join(str(query).split())
         self.execute_calls.append((q, params))
 
-        if "rescan_owner_token IS NULL FOR UPDATE" in q:
-            self._fetchone = None if self.script.get("rescan_owned") else {"id": params[0], "mode": "repost"}
+        if "rescan_owner_token IS NULL AND rescan_operation IS NULL FOR UPDATE" in q:
+            blocked = self.script.get("rescan_owned") or self.script.get("rescan_retry_pending")
+            self._fetchone = None if blocked else {"id": params[0], "mode": "repost"}
             return
 
         if "SELECT 1 FROM telegram_publication_receipts" in q:
@@ -235,8 +236,8 @@ def test_manual_queue_mutations_refused_during_rescan():
              "delivery_method": "copy"},
         ],
     }
-    def setup(owned):
-        repo = _RepoForTests(script={**script, "rescan_owned": owned})
+    def setup(owned, retry_pending=False):
+        repo = _RepoForTests(script={**script, "rescan_owned": owned, "rescan_retry_pending": retry_pending})
         repo._get_rule_pending_logical_items_conn = lambda conn, rule_id, mode: [
             {"position": 1, "kind": "single", "delivery_ids": [2],
              "first_post_id": 102, "first_message_id": 202, "count": 1},
@@ -249,6 +250,11 @@ def test_manual_queue_mutations_refused_during_rescan():
     assert owned.rollback_last_delivery(30) is None
     assert owned.set_rule_start_from_position(30, 2) is None
     assert not owned.fake_conn.cursor_obj.executemany_calls
+
+    retry_pending = setup(False, retry_pending=True)
+    assert retry_pending.rollback_last_delivery(30) is None
+    assert retry_pending.set_rule_start_from_position(30, 2) is None
+    assert not retry_pending.fake_conn.cursor_obj.executemany_calls
 
     available = setup(False)
     assert available.rollback_last_delivery(30) is not None
