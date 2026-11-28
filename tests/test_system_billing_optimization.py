@@ -42,3 +42,35 @@ def test_degraded_video_preserves_admission_with_single_snapshot():
     repo.get_tenant_job_counts.assert_not_called()
     repo.get_tenant_processing_counts.assert_not_called()
     repo.get_tenant_retry_counts.assert_not_called()
+
+
+def test_billing_edit_callbacks_reject_invalid_data_and_keep_cancel():
+    import asyncio
+    from unittest.mock import AsyncMock
+    from aiogram import Dispatcher
+    from app.admin_handlers.system import register_admin_system_handlers
+
+    dp = Dispatcher()
+    ctx = SimpleNamespace(
+        is_admin_callback=AsyncMock(return_value=True),
+        answer_callback_safe=AsyncMock(),
+        answer_callback_safe_once=AsyncMock(),
+        edit_message_text_safe=AsyncMock(),
+        user_states={},
+    )
+    register_admin_system_handlers(dp, ctx)
+    handlers = {handler.callback.__name__: handler.callback for handler in dp.callback_query.handlers}
+    for name, data in (
+        ("handle_billing_usd_edit", "admin_billing_usd_edit:fake:1"),
+        ("handle_billing_rate_edit", "admin_billing_rate_edit:XYZ"),
+        ("handle_fixed_price_edit", "admin_fixed_price_edit:stars:basic:no"),
+    ):
+        asyncio.run(handlers[name](SimpleNamespace(data=data, from_user=SimpleNamespace(id=1), message=object())))
+        assert not ctx.user_states
+    assert ctx.answer_callback_safe.await_count == 3
+    asyncio.run(handlers["handle_billing_usd_edit"](SimpleNamespace(
+        data="admin_billing_usd_edit:basic:1", from_user=SimpleNamespace(id=1), message=object(),
+    )))
+    assert ctx.user_states[1]["period_months"] == 1
+    kb = ctx.edit_message_text_safe.call_args.kwargs["reply_markup"]
+    assert kb.inline_keyboard[0][0].callback_data == "admin_billing_usd_plan:basic"

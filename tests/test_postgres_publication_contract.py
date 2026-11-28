@@ -2130,3 +2130,52 @@ def test_diagnostics_publication_filter_includes_pipeline_and_caption_events(rep
         "delivery_caption_mode_selected", "delivery_pipeline_step",
     ]
     assert all(row["error_text"] == marker for row in rows)
+
+
+def test_heavy_admission_counts_match_existing_queries(repo):
+    tenant = uuid4().int % 10**12 + 10
+    payload = json.dumps({"tenant_id": tenant})
+    other = json.dumps({"tenant_id": tenant + 1})
+    ids = []
+    try:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                for queue, status, data in [
+                    ("heavy", "pending", payload),
+                    ("heavy", "retry", payload),
+                    ("heavy", "leased", payload),
+                    ("heavy", "processing", payload),
+                    ("heavy", "done", payload),
+                    ("heavy", "failed", payload),
+                    ("light", "pending", payload),
+                    ("heavy", "pending", other),
+                ]:
+                    cur.execute("""
+                        INSERT INTO jobs(job_type,payload_json,queue,status)
+                        VALUES ('video_delivery',%s::jsonb,%s,%s) RETURNING id
+                    """, (data, queue, status))
+                    ids.append(cur.fetchone()["id"])
+        counts = repo.get_tenant_heavy_admission_counts(tenant)
+        assert counts == {"pending": 2, "processing": 2, "retry": 1}
+        assert counts == {
+            "pending": repo.get_tenant_job_counts(queue="heavy")[tenant],
+            "processing": repo.get_tenant_processing_counts(queue="heavy")[tenant],
+            "retry": repo.get_tenant_retry_counts(queue="heavy")[tenant],
+        }
+        assert repo.get_tenant_heavy_admission_counts(tenant + 2) == {
+            "pending": 0, "processing": 0, "retry": 0,
+        }
+    finally:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM jobs WHERE id=ANY(%s)", (ids,))
+
+
+def test_billing_rejects_nonfinite_prices_without_persistence(repo):
+    for invalid in (float("nan"), float("inf"), float("-inf"), 0, -1):
+        assert not repo.set_billing_exchange_rate(currency="RUB", new_value=invalid)
+        assert not repo.set_billing_usd_price(tariff_code="basic", period_months=1, new_price=invalid)
+        assert not repo.set_billing_fixed_price(kind="crypto", tariff_code="basic",
+                                                period_months=1, value={"amount": str(invalid)})
+    assert not repo.set_billing_fixed_price(kind="stars", tariff_code="basic",
+                                            period_months=1, value={"amount": 1.5})

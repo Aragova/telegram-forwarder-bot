@@ -16,6 +16,12 @@ def _normalize_button_text(text: str | None) -> str:
     return (text or "").replace("\ufe0f", "").strip()
 
 
+def _cancel_price_kb(back_callback: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=back_callback)],
+    ])
+
+
 def _billing_home_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💵 Цены USD", callback_data="admin_billing_usd")],
@@ -160,7 +166,9 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             return
         ctx.reset_user_state(callback.from_user.id)
         await ctx.answer_callback_safe_once(callback)
-        await ctx.edit_message_text_safe(message=callback.message, text="⚙️ Раздел: Система")
+        await ctx.edit_message_text_safe(message=callback.message, text="Настройки биллинга закрыты.")
+        await ctx.send_message_safe(chat_id=callback.message.chat.id, text="⚙️ Раздел: Система",
+                                    reply_markup=ctx.get_system_menu())
 
     @dp.message(lambda m: _normalize_button_text(m.text) == "💱 Курсы валют")
     async def handle_billing_rates_menu(message: Message):
@@ -216,10 +224,17 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
     async def handle_billing_usd_edit(callback: CallbackQuery):
         if not await ctx.is_admin_callback(callback):
             return
-        _, code, period = str(callback.data).split(":")
-        user_id = callback.from_user.id if callback.from_user else ctx.settings.admin_id
+        parts = str(callback.data).split(":")
+        if len(parts) != 3 or parts[1] not in USD_PRICES or parts[2] not in {"1", "3", "6", "12"}:
+            await ctx.answer_callback_safe(callback, "Некорректный тариф или период", show_alert=True)
+            return
+        _, code, period = parts
+        user_id = callback.from_user.id
         ctx.user_states[user_id] = {"action": "admin_billing_usd_price_input", "tariff_code": code, "period_months": int(period)}
-        await ctx.edit_message_text_safe(message=callback.message, text="Введите новую цену в USD.\n\nПример:\n11\nили\n11.5")
+        await ctx.edit_message_text_safe(
+            message=callback.message, text="Введите новую цену в USD.\n\nПример:\n11\nили\n11.5",
+            reply_markup=_cancel_price_kb(f"admin_billing_usd_plan:{code}"),
+        )
         await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data == "admin_billing_rates")
@@ -235,9 +250,15 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         if not await ctx.is_admin_callback(callback):
             return
         currency = str(callback.data).split(":", 1)[1].upper()
-        user_id = callback.from_user.id if callback.from_user else ctx.settings.admin_id
+        if currency not in {"RUB", "EUR", "UAH"}:
+            await ctx.answer_callback_safe(callback, "Некорректная валюта", show_alert=True)
+            return
+        user_id = callback.from_user.id
         ctx.user_states[user_id] = {"action": "admin_billing_rate_input", "currency": currency}
-        await ctx.edit_message_text_safe(message=callback.message, text=f"Введите новый курс USD→{currency} (положительное число):")
+        await ctx.edit_message_text_safe(
+            message=callback.message, text=f"Введите новый курс USD→{currency} (положительное число):",
+            reply_markup=_cancel_price_kb("admin_billing_rates"),
+        )
         await ctx.answer_callback_safe_once(callback)
 
     @dp.message(lambda m: m.from_user is not None and ctx.user_states.get(m.from_user.id, {}).get("action") == "admin_billing_rate_input")
@@ -314,6 +335,9 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             return
         ctx.reset_user_state(callback.from_user.id)
         kind = str(callback.data).split(":", 1)[1]
+        if kind not in {"stars", "crypto"}:
+            await ctx.answer_callback_safe(callback, "Некорректный способ оплаты", show_alert=True)
+            return
         title = "⭐ Telegram Stars — фикс-цены" if kind == "stars" else "₿ Crypto — фикс-цены"
         lines = []
         for code, label in (("basic", "💎 BASIC"), ("pro", "🚀 PRO")):
@@ -327,7 +351,11 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         if not await ctx.is_admin_callback(callback):
             return
         ctx.reset_user_state(callback.from_user.id)
-        _, kind, code = str(callback.data).split(":")
+        parts = str(callback.data).split(":")
+        if len(parts) != 3:
+            await ctx.answer_callback_safe(callback, "Некорректные параметры", show_alert=True)
+            return
+        _, kind, code = parts
         icon = "⭐" if kind == "stars" else "₿"
         if kind not in {"stars", "crypto"} or code not in USD_PRICES:
             await ctx.answer_callback_safe(callback, "Некорректные параметры", show_alert=True)
@@ -340,15 +368,23 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
     async def handle_fixed_price_edit(callback: CallbackQuery):
         if not await ctx.is_admin_callback(callback):
             return
-        _, kind, code, period = str(callback.data).split(":")
-        user_id = callback.from_user.id if callback.from_user else ctx.settings.admin_id
+        parts = str(callback.data).split(":")
+        if (len(parts) != 4 or parts[1] not in {"stars", "crypto"}
+                or parts[2] not in USD_PRICES or parts[3] not in {"1", "3", "6", "12"}):
+            await ctx.answer_callback_safe(callback, "Некорректные параметры", show_alert=True)
+            return
+        _, kind, code, period = parts
+        user_id = callback.from_user.id
         ctx.user_states[user_id] = {"action": "admin_fixed_price_input", "kind": kind, "tariff_code": code, "period_months": int(period)}
         text = (
             "Введите новую цену в Telegram Stars.\n\nПример:\n900"
             if kind == "stars"
             else "Введите фиксированную цену для Crypto.\n\nПримеры:\n9\n9.5\n$9\n$9.50"
         )
-        await ctx.edit_message_text_safe(message=callback.message, text=text)
+        await ctx.edit_message_text_safe(
+            message=callback.message, text=text,
+            reply_markup=_cancel_price_kb(f"admin_fixed_prices_plan:{kind}:{code}"),
+        )
         await ctx.answer_callback_safe_once(callback)
 
     @dp.message(lambda m: m.from_user is not None and ctx.user_states.get(m.from_user.id, {}).get("action") == "admin_fixed_price_input")
@@ -365,7 +401,7 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         admin_id = message.from_user.id if message.from_user else ctx.settings.admin_id
         value = None
         if kind == "stars":
-            if not raw.isdigit():
+            if not raw.isascii() or not raw.isdigit() or len(raw) > 8:
                 await ctx.send_message_safe(chat_id=message.chat.id, text="❌ Ошибка: введите целое положительное число.")
                 return
             amount = int(raw)
