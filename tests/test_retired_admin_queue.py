@@ -133,7 +133,7 @@ def test_finance_navigation_preempts_scheduled_material_handler():
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "bot.py", "exec"), env)
     matches = eval(compile(ast.Expression(predicate), "bot.py", "eval"), env)
-    for label in ("💳 Финансы", "💳 Биллинг и тарифы", " 💳\\ufe0f Финансы "):
+    for label in ("💳 Финансы", "💳 Биллинг и тарифы", " 💳\ufe0f Финансы "):
         states[1] = {"state": "waiting_vip_scheduled_post_material"}
         message = SimpleNamespace(text=label, from_user=SimpleNamespace(id=1),
                                   chat=SimpleNamespace(id=1, type="private"))
