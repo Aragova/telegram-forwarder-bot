@@ -8665,25 +8665,29 @@ async def _shutdown_runtime(
     global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, repost_campaign_runtime_tasks, channel_title_sync_task, rescan_recovery_task, rescan_recovery_stop
 
     runtime_ownership.begin_shutdown()
-    # Stop producers before consumers. The scheduler joins its current SQL
-    # transaction instead of detaching a to_thread write on cancellation.
+    # Signal every producer before awaiting any join. A scheduler SQL tick
+    # may still commit its already-started transaction; its jobs are durable.
     if scheduler_runtime_task and not scheduler_runtime_task.done():
         scheduler_runtime_task.cancel()
-        await asyncio.gather(scheduler_runtime_task, return_exceptions=True)
-    scheduler_runtime_task = None
-
-    # Cancel and join durable rescans before closing clients. Their lease and
-    # commit marker remain in PostgreSQL for startup recovery.
-    if rescan_recovery_task is not None:
-        if rescan_recovery_stop is not None:
-            rescan_recovery_stop.set()
-        await asyncio.gather(rescan_recovery_task, return_exceptions=True)
-        rescan_recovery_task = None
-        rescan_recovery_stop = None
+    if rescan_recovery_stop is not None:
+        rescan_recovery_stop.set()
     tasks = list(rule_ui_tasks.values())
     for task in tasks:
         task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def drain_producers():
+        global scheduler_runtime_task, rescan_recovery_task, rescan_recovery_stop
+        # Keep each owner alive until its SQL/Telegram work has settled.
+        # Consumer drains and evidence persistence run concurrently, so a
+        # blocked producer cannot keep them admitting new work.
+        if scheduler_runtime_task is not None:
+            await asyncio.gather(scheduler_runtime_task, return_exceptions=True)
+        scheduler_runtime_task = None
+        if rescan_recovery_task is not None:
+            await asyncio.gather(rescan_recovery_task, return_exceptions=True)
+        rescan_recovery_task = None
+        rescan_recovery_stop = None
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def drain_workers():
         if stop_workers_runtime:
@@ -8696,16 +8700,16 @@ async def _shutdown_runtime(
             repost_campaign_runtime_tasks_local = None
 
     async def drain_consumers():
-        # Both runtimes must stop admitting work even if the other is stuck
-        # in cleanup. Join both before propagating errors or closing clients.
+        # All runtimes must stop admitting work even if another is stuck.
+        # Join all before propagating errors or closing clients.
         results = await wait_for_db_task(asyncio.gather(
-            drain_workers(), drain_campaigns(), return_exceptions=True,
+            drain_producers(), drain_workers(), drain_campaigns(), return_exceptions=True,
         ))
         for result in results:
             if isinstance(result, BaseException):
                 raise result
 
-    # Keep one flusher alive across both concurrent drains.
+    # Keep one flusher alive across producer and consumer joins.
     repost_campaign_runtime_tasks_local = repost_campaign_runtime_tasks
     await _drain_with_publication_flush(drain_consumers)
     repost_campaign_runtime_tasks = repost_campaign_runtime_tasks_local
