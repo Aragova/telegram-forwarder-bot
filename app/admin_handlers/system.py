@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from math import isfinite
 from html import escape
+from typing import Any, Callable
 
 from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -28,15 +29,21 @@ def _billing_home_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="admin_fixed_prices_kind:stars")],
         [InlineKeyboardButton(text="₿ Crypto", callback_data="admin_fixed_prices_kind:crypto")],
         [InlineKeyboardButton(text="💱 Курсы валют", callback_data="admin_billing_rates")],
-        [InlineKeyboardButton(text="⬅️ Назад в систему", callback_data="admin_billing_home_back")],
+        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="admin_billing_home_back")],
     ])
 
 
 BILLING_HOME_TEXT = (
-    "<b>💳 БИЛЛИНГ И ТАРИФЫ</b>\n\n"
+    "<b>💳 ФИНАНСЫ</b>\n\n"
     "💎 <b>BASIC</b>\n🚀 <b>PRO</b>\n\n"
     "USD и курсы валют, отдельные фиксированные цены Stars и Crypto."
 )
+
+
+async def show_billing_home(message: Message, *, send_message_safe: Callable[..., Any]) -> None:
+    """Render the shared finance screen after the caller authorizes navigation."""
+    await send_message_safe(chat_id=message.chat.id, text=BILLING_HOME_TEXT,
+                            parse_mode="HTML", reply_markup=_billing_home_kb())
 
 
 class _FixedPriceSnapshot:
@@ -143,14 +150,13 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             ctx.reset_user_state(message.from_user.id)
         await ctx.send_message_safe(chat_id=message.chat.id, text="⚙️ Раздел: Система", reply_markup=ctx.get_system_menu())
 
-    @dp.message(lambda m: _normalize_button_text(m.text) == "💳 Биллинг и тарифы")
+    @dp.message(lambda m: m.text is not None and _normalize_button_text(m.text) in {"💳 Финансы", "💳 Биллинг и тарифы"})
     async def handle_billing_home(message: Message):
         if not await ctx.is_admin(message):
             return
         if message.from_user:
             ctx.reset_user_state(message.from_user.id)
-        await ctx.send_message_safe(chat_id=message.chat.id, text=BILLING_HOME_TEXT,
-                                    parse_mode="HTML", reply_markup=_billing_home_kb())
+        await show_billing_home(message, send_message_safe=ctx.send_message_safe)
 
     @dp.callback_query(lambda c: c.data in {"admin_billing_home", "admin_billing_rates_back",
                                             "admin_billing_usd_back", "admin_fixed_prices_back"})
@@ -169,8 +175,8 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         ctx.reset_user_state(callback.from_user.id)
         await ctx.answer_callback_safe_once(callback)
         await ctx.edit_message_text_safe(message=callback.message, text="Настройки биллинга закрыты.")
-        await ctx.send_message_safe(chat_id=callback.message.chat.id, text="⚙️ Раздел: Система",
-                                    reply_markup=ctx.get_system_menu())
+        await ctx.send_message_safe(chat_id=callback.message.chat.id, text="📋 Главное меню",
+                                    reply_markup=ctx.get_main_menu())
 
     @dp.message(lambda m: _normalize_button_text(m.text) == "💱 Курсы валют")
     async def handle_billing_rates_menu(message: Message):

@@ -8,7 +8,7 @@ EXPECTED_ADMIN_TEXTS = [
     "📈 Живой статус",
     "🔄 Правила",
     "📡 Каналы",
-    "📦 Очередь",
+    "💳 Финансы",
     "⚠️ Диагностика",
     "⚙️ Система",
 ]
@@ -17,7 +17,7 @@ EXPECTED_ADMIN_REPLY_KEYBOARD_TEXTS = [
     "📈 Живой статус",
     "🔄 Правила",
     "📡 Каналы",
-    "📦 Очередь",
+    "💳 Финансы",
     "⚠️ Диагностика",
     "⚙️ Система",
     "▶️ Запустить пересылку",
@@ -49,7 +49,6 @@ EXPECTED_USER_CALLBACK_PREFIXES = [
 def test_admin_handlers_modules_importable() -> None:
     assert importlib.import_module("app.admin_handlers.menu") is not None
     assert importlib.import_module("app.admin_handlers.channels") is not None
-    assert importlib.import_module("app.admin_handlers.queue") is not None
     assert importlib.import_module("app.admin_handlers.diagnostics") is not None
     assert importlib.import_module("app.admin_handlers.system") is not None
 
@@ -57,7 +56,6 @@ def test_admin_handlers_modules_importable() -> None:
 def test_admin_register_functions_exist() -> None:
     assert callable(getattr(importlib.import_module("app.admin_handlers.menu"), "register_admin_menu_handlers"))
     assert callable(getattr(importlib.import_module("app.admin_handlers.channels"), "register_admin_channel_handlers"))
-    assert callable(getattr(importlib.import_module("app.admin_handlers.queue"), "register_admin_queue_handlers"))
     assert callable(getattr(importlib.import_module("app.admin_handlers.diagnostics"), "register_admin_diagnostics_handlers"))
     assert callable(getattr(importlib.import_module("app.admin_handlers.system"), "register_admin_system_handlers"))
 

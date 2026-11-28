@@ -14,6 +14,7 @@ def test_billing_menu_and_fixed_price_snapshot():
     text = _build_fixed_prices_text(SimpleNamespace(db=repo))
     assert "1234 Stars" in text and "$11.5" in text
     assert [call.args for call in repo.get_billing_fixed_prices.call_args_list] == [("stars",), ("crypto",)]
+    assert _billing_home_kb().inline_keyboard[-1][0].text == "⬅️ Назад в меню"
     callbacks = [b.callback_data for row in _billing_home_kb().inline_keyboard for b in row]
     assert callbacks == ["admin_billing_usd", "admin_fixed_prices_kind:stars",
                          "admin_fixed_prices_kind:crypto", "admin_billing_rates", "admin_billing_home_back"]

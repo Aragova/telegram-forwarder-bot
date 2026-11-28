@@ -29,7 +29,7 @@ def get_main_menu() -> ReplyKeyboardMarkup:
     return _kb(
         [
             ["📈 Живой статус", "🔄 Правила"],
-            ["📡 Каналы", "📦 Очередь"],
+            ["📡 Каналы", "💳 Финансы"],
             ["⚠️ Диагностика", "⚙️ Система"],
         ],
         placeholder="Выберите действие",
@@ -49,7 +49,6 @@ def get_system_menu() -> ReplyKeyboardMarkup:
     return _kb(
         [
             ["▶️ Запустить пересылку", "⏸ Остановить пересылку"],
-            ["💳 Биллинг и тарифы"],
             ["⬅️ Назад в меню"],
         ],
         placeholder="Раздел: Система",
@@ -106,26 +105,6 @@ def get_channels_menu() -> ReplyKeyboardMarkup:
     )
 
 
-# 🔄 Меню сброса
-def get_reset_queue_menu() -> ReplyKeyboardMarkup:
-    return _kb(
-        [
-            ["🔄 Сбросить всё"],
-            ["📊 Сброс по источнику"],
-            ["🔙 Главное меню"],
-        ]
-    )
-
-def get_queue_menu() -> ReplyKeyboardMarkup:
-    return _kb(
-        [
-            ["📋 Общая очередь"],
-            ["🔄 Сбросить всё", "📊 Сброс по источнику"],
-            ["⬅️ Назад в меню"],
-        ],
-        placeholder="Раздел: Очередь",
-    )
-
 # Универсальный список выбора
 def build_select_keyboard(
     items: list[str],
@@ -163,10 +142,3 @@ def build_targets_keyboard(labels: list[str]) -> ReplyKeyboardMarkup:
 
 def build_rules_delete_keyboard(labels: list[str]) -> ReplyKeyboardMarkup:
     return build_select_keyboard(labels)
-
-
-# Сброс по каналам
-def build_reset_channels_keyboard(labels: list[str]) -> ReplyKeyboardMarkup:
-    rows = [[label] for label in labels]
-    rows.append(["🔙 Главное меню"])
-    return _kb(rows)
