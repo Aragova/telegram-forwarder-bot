@@ -42,9 +42,8 @@ UI запускает тот же fresh/keep алгоритм. Под блоки
 Начало shutdown запрещает новые UI jobs и worker generations. Scheduler
 отменяется первым: его уже начатый tick завершает текущую транзакцию и не
 принимает следующее правило. Долгие UI/rescan задачи отменяются и join,
-а незавершённые операции остаются в БД. Worker и campaign drain при
-неполном завершении повторяется; ресурсы не закрываются и main не возвращается
-до завершения. Существующий systemd TimeoutStopUSec остаётся внешней
+а незавершённые операции остаются в БД. Worker и campaign drain ожидает завершения оставшихся задач;
+ресурсы не закрываются и main не возвращается до завершения. Существующий systemd TimeoutStopUSec остаётся внешней
 границей; SIGKILL при аварии не является подтверждением результата Telegram.
 Долговечные receipts и ledger остаются источником восстановления доставки.
 
@@ -54,3 +53,5 @@ UI запускает тот же fresh/keep алгоритм. Под блоки
 
 
 Shutdown waits directly on remaining worker/campaign task completion after the initial bounded drain. It does not re-cancel their cleanup. The recovery supervisor uses a stop event to wake immediately when idle; its current rescan child is cancelled and joined separately. The periodic database expiry check remains necessary because leases may expire without any local notification. Manual worker stop retains its existing bounded behavior.
+
+Запись аудита автоматического recovery выполняется в транзакции снятия блокировки. Повтор после потерянного ответа commit не дублирует audit. Пока длится worker/campaign drain, отдельная ограниченная по времени попытка записи publication inbox повторяется периодически; финальная проверка перед закрытием Telethon сохраняется.
