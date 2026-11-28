@@ -8624,7 +8624,9 @@ def _start_repost_campaign_runtime_tasks(*, role: str) -> None:
 async def _drain_with_publication_flush(drain) -> None:
     """Persist publication evidence even while a worker is stuck in cleanup."""
     raw_client = getattr(telethon_client, "raw", telethon_client)
-    flush = getattr(raw_client, "flush_publication_inbox", None)
+    flush = getattr(raw_client, "persist_publication_evidence", None)
+    if not callable(flush):
+        flush = getattr(raw_client, "flush_publication_inbox", None)
     if not callable(flush):
         await drain()
         return
@@ -8634,7 +8636,10 @@ async def _drain_with_publication_flush(drain) -> None:
     async def persist_until_drained() -> None:
         while not stop.is_set():
             try:
-                await asyncio.wait_for(flush(), timeout=5)
+                # A started evidence write must settle; wait_for is not an
+                # absolute I/O deadline. The production path never replays
+                # durable journal entries here.
+                await flush()
             except Exception:
                 logger.exception("PUBLICATION_SHUTDOWN_DRAIN_FLUSH_FAILED")
             try:
@@ -8736,10 +8741,12 @@ async def _shutdown_runtime(
     # the only in-memory scheduled-to-published mappings.
     if telethon_client is not None:
         raw_publication_client = getattr(telethon_client, "raw", telethon_client)
-        flush_publication = getattr(raw_publication_client, "flush_publication_inbox", None)
+        flush_publication = getattr(raw_publication_client, "persist_publication_evidence", None)
+        if not callable(flush_publication):
+            flush_publication = getattr(raw_publication_client, "flush_publication_inbox", None)
         if callable(flush_publication):
             try:
-                await asyncio.wait_for(flush_publication(), timeout=5)
+                await flush_publication()
             except Exception:
                 logger.exception("PUBLICATION_SHUTDOWN_FLUSH_FAILED | recovery=next_startup")
         while getattr(raw_publication_client, "publication_evidence_unpersisted", False):
@@ -8750,7 +8757,7 @@ async def _shutdown_runtime(
             )
             await asyncio.sleep(5)
             try:
-                await asyncio.wait_for(flush_publication(), timeout=5)
+                await flush_publication()
             except Exception:
                 logger.exception("PUBLICATION_SHUTDOWN_RETRY_FAILED")
 
@@ -8764,7 +8771,10 @@ async def _shutdown_runtime(
             raw_telethon.publication_write_blocked = True
             await asyncio.sleep(5)
             try:
-                await asyncio.wait_for(raw_telethon.flush_publication_inbox(), timeout=5)
+                persist_evidence = getattr(raw_telethon, "persist_publication_evidence", None)
+                if not callable(persist_evidence):
+                    persist_evidence = raw_telethon.flush_publication_inbox
+                await persist_evidence()
             except Exception:
                 logger.exception("PUBLICATION_SHUTDOWN_RETRY_FAILED")
         try:
