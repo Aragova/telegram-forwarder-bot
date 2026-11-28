@@ -80,8 +80,10 @@ def test_recovery_stop_event_wakes_supervisor_without_waiting_for_period():
     async def scenario():
         entered = asyncio.Event()
         stop = asyncio.Event()
+        resume_query = asyncio.Event()
         async def read(*args, **kwargs):
             entered.set()
+            await resume_query.wait()
             return []
         ns = {"asyncio": asyncio, "runtime_ownership": SimpleNamespace(can_poll=True),
               "db": SimpleNamespace(list_expired_rule_rescans=Mock()),
@@ -89,10 +91,11 @@ def test_recovery_stop_event_wakes_supervisor_without_waiting_for_period():
               "rescan_recovery_job": None}
         exec(compile(ast.Module(body=[fn], type_ignores=[]), "bot.py", "exec"), ns)
         supervisor = asyncio.create_task(ns["_rescan_recovery_loop"](stop))
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), timeout=1)
         stop.set()
+        resume_query.set()
         await asyncio.wait_for(supervisor, timeout=0.5)
-        ns["run_db"].assert_awaited_once()
+        ns["run_db"].assert_awaited_once_with(ns["db"].list_expired_rule_rescans, phase="rebuilt")
 
     asyncio.run(scenario())
 
