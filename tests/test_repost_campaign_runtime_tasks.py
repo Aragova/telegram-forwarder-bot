@@ -381,11 +381,42 @@ def test_shutdown_requests_completion_before_closing_telegram_clients(with_publi
     }
     module = ast.fix_missing_locations(ast.Module(body=[drain_helper, fn], type_ignores=[]))
     exec(compile(module, "bot.py", "exec"), ctx)
-    result = asyncio.run(ctx["_shutdown_runtime"](
-        stop_workers_runtime=stop_workers, close_dashboard_tasks=True,
-        close_telegram_clients=True, close_bot_session=True,
-    ))
+    async def scenario():
+        scheduler_entered = asyncio.Event()
+        recovery_entered = asyncio.Event()
+        recovery_stop = asyncio.Event()
+
+        async def scheduler():
+            scheduler_entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                # Model a scheduler tick blocked in cancellation-safe SQL.
+                # Campaigns and the flusher must start before it can finish.
+                await asyncio.wait_for(campaign_stopped.wait(), timeout=2)
+                events.append("scheduler_cleanup")
+
+        async def recovery():
+            recovery_entered.set()
+            await recovery_stop.wait()
+            await asyncio.wait_for(campaign_stopped.wait(), timeout=2)
+            events.append("recovery_cleanup")
+
+        ctx["scheduler_runtime_task"] = asyncio.create_task(scheduler())
+        ctx["rescan_recovery_task"] = asyncio.create_task(recovery())
+        ctx["rescan_recovery_stop"] = recovery_stop
+        await scheduler_entered.wait()
+        await recovery_entered.wait()
+        return await ctx["_shutdown_runtime"](
+            stop_workers_runtime=stop_workers, close_dashboard_tasks=True,
+            close_telegram_clients=True, close_bot_session=True,
+        )
+
+    result = asyncio.run(scenario())
     assert result is True
+    for cleanup in ("scheduler_cleanup", "recovery_cleanup"):
+        assert events.index("campaign_stop") < events.index(cleanup)
+        assert events.index(cleanup) < events.index("telethon_disconnect")
     assert events.count("campaign_stop") == 1
     if stop_workers:
         assert events.index("campaign_stop") < events.index("workers_cleanup")
