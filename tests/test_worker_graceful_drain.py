@@ -325,3 +325,40 @@ def test_shutdown_flusher_never_starts_optional_durable_replay():
         await asyncio.wait_for(task, timeout=1)
 
     asyncio.run(scenario())
+
+
+def test_reaction_shutdown_stops_admission_and_joins_current_job(monkeypatch):
+    from app.reaction_worker import ReactionWorker
+
+    async def scenario():
+        stop, entered, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        worker = ReactionWorker(db=object(), worker_id="test")
+        calls = 0
+
+        async def process_once():
+            nonlocal calls
+            calls += 1
+            entered.set()
+            await release.wait()
+            return True
+
+        monkeypatch.setattr(worker, "process_once", process_once)
+        task = asyncio.create_task(worker.run_forever(stop_event=stop))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            stop.set()
+            await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            release.set()
+            await asyncio.wait_for(task, timeout=1)
+        assert calls == 1
+
+    asyncio.run(scenario())
+
+    source = Path("bot.py").read_text(encoding="utf-8")
+    shutdown = source[source.index("async def _shutdown_runtime("):
+                      source.index("async def _run_scheduler_role_loop()")]
+    assert shutdown.index("reaction_worker_stop.set()") < shutdown.index("await _drain_with_publication_flush(drain_consumers)")
+    assert "drain_campaigns(), drain_reactions()" in shutdown
+    assert "await asyncio.gather(reaction_worker_task" in shutdown

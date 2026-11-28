@@ -1147,7 +1147,8 @@ def test_recovered_committed_or_exhausted_operation_never_parses_again(phase, at
     show.assert_not_awaited()
 
 
-def test_recovery_keeps_original_cursor_even_after_partial_history_scan():
+@pytest.mark.parametrize("stall_stage", [None, "history", "verify"])
+def test_recovery_keeps_original_cursor_even_after_partial_history_scan(stall_stage):
     import asyncio
     import logging
     from unittest.mock import AsyncMock, Mock
@@ -1169,15 +1170,26 @@ def test_recovery_keeps_original_cursor_even_after_partial_history_scan():
         return func(*args, **kwargs)
 
     scan, show = AsyncMock(return_value=(5, {1, 100, 526})), AsyncMock()
+    verify = AsyncMock(return_value=set())
+    if stall_stage == "history":
+        scan.side_effect = TimeoutError("history stalled")
+    elif stall_stage == "verify":
+        verify.side_effect = TimeoutError("verification stalled")
     handler = _load_rescan_handler("_run_rescan_rule_job", {
         "asyncio": asyncio, "db": repo, "run_db": run_db, "RescanBlocked": RescanBlocked,
         "logger": logging.getLogger(__name__), "_scan_rule_source": scan,
-        "_verify_rescan_live_arrivals": AsyncMock(return_value=set()),
+        "_verify_rescan_live_arrivals": verify,
         "cancel_local_rule_delivery_jobs": Mock(), "_show_rule_processing_screen": show,
         "invalidate_preview_cache": Mock(), "invalidate_rule_card_cache": Mock(),
     })
     asyncio.run(handler(rule_id=94, recovery=True))
     scan.assert_awaited_once_with(rule, 94, "new-owner")
+    if stall_stage is not None:
+        repo.rebuild_rule_keep_position.assert_not_called()
+        repo.finish_rule_rescan.assert_not_called()
+        repo.log_rule_change.assert_not_called()
+        show.assert_not_awaited()
+        return
     repo.rebuild_rule_keep_position.assert_called_once_with(
         94, before_message_id=100, owner_token="new-owner", allowed_message_ids={1, 100, 526},
         include_newer_than_message_id=525, checked_missing_message_ids=set(),
