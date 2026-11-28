@@ -298,19 +298,28 @@ def test_bot_polling_preserves_session_until_campaign_shutdown():
     assert session_options[0].value is False
 
 
-def test_shutdown_requests_completion_before_closing_telegram_clients():
+@pytest.mark.parametrize("with_publication_flush", [False, True])
+def test_shutdown_requests_completion_before_closing_telegram_clients(with_publication_flush):
     import ast
     from pathlib import Path
+    from app.runtime_utils import wait_for_db_task
 
     parsed = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
     fn = next(
         n for n in parsed.body
         if isinstance(n, ast.AsyncFunctionDef) and n.name == "_shutdown_runtime"
     )
+    drain_helper = next(
+        n for n in parsed.body
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_drain_with_publication_flush"
+    )
     events = []
+    flushed = asyncio.Event()
 
-    async def fail_drain(*, wait_until_complete):
+    async def drain_campaign(*, wait_until_complete):
         assert wait_until_complete is True
+        if with_publication_flush:
+            await asyncio.wait_for(flushed.wait(), timeout=2)
         events.append("campaign_stop")
         assert "telethon_disconnect" not in events
         assert "bot_session_close" not in events
@@ -318,8 +327,14 @@ def test_shutdown_requests_completion_before_closing_telegram_clients():
     async def record(name):
         events.append(name)
 
-    campaign = SimpleNamespace(stop=fail_drain)
+    async def flush():
+        events.append("publication_flush")
+        flushed.set()
+
+    campaign = SimpleNamespace(stop=drain_campaign)
     raw_telethon = SimpleNamespace(disconnect=lambda: record("telethon_disconnect"))
+    if with_publication_flush:
+        raw_telethon.flush_publication_inbox = flush
     reactor = SimpleNamespace(client=SimpleNamespace(disconnect=lambda: record("reaction_disconnect")), session_name="r")
     raw_bot = SimpleNamespace(session=SimpleNamespace(close=lambda: record("bot_session_close")))
     ctx = {
@@ -334,6 +349,9 @@ def test_shutdown_requests_completion_before_closing_telegram_clients():
         "repost_campaign_runtime_tasks": campaign,
         "scheduler_runtime_task": None,
         "rescan_recovery_task": None,
+        "rescan_recovery_stop": None,
+        "rescan_recovery_job": None,
+        "wait_for_db_task": wait_for_db_task,
         "rule_ui_tasks": {},
         "job_watchdog_task": None,
         "reaction_worker_task": None,
@@ -345,7 +363,7 @@ def test_shutdown_requests_completion_before_closing_telegram_clients():
         "bot": raw_bot,
         "runtime_context": SimpleNamespace(),
     }
-    module = ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[]))
+    module = ast.fix_missing_locations(ast.Module(body=[drain_helper, fn], type_ignores=[]))
     exec(compile(module, "bot.py", "exec"), ctx)
     result = asyncio.run(ctx["_shutdown_runtime"](
         stop_workers_runtime=False, close_dashboard_tasks=True,
@@ -353,6 +371,12 @@ def test_shutdown_requests_completion_before_closing_telegram_clients():
     ))
     assert result is True
     assert events.count("campaign_stop") == 1
+    if with_publication_flush:
+        assert events.index("publication_flush") < events.index("campaign_stop")
+        assert events.count("publication_flush") >= 2
+        assert max(i for i, event in enumerate(events) if event == "publication_flush") < events.index("telethon_disconnect")
+    else:
+        assert "publication_flush" not in events
     assert "background_cleanup" in events and "processor_cleanup" in events
     assert events.index("telethon_disconnect") > events.index("campaign_stop")
     assert "reaction_disconnect" in events
