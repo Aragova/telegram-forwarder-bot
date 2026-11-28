@@ -184,22 +184,18 @@ def test_recovery_refuses_partial_verification_without_opening_transaction():
 
 def test_rescan_never_deletes_shared_source_posts_and_uses_common_rebuild():
     source = Path("bot.py").read_text(encoding="utf-8")
-    keep = source.split("async def _run_rescan_rule_keep_job(", 1)[1].split(
-        "\n@dataclass(slots=True)", 1
+    common = source.split("async def _run_rescan_rule_job(", 1)[1].split(
+        "async def _rescan_recovery_loop(", 1
     )[0]
-    fresh = source.split("async def _run_rescan_rule_fresh_job(", 1)[1].split(
-        "async def _run_rescan_rule_keep_job(", 1
-    )[0]
-    assert "db.clear_rule_deliveries" not in keep + fresh
-    assert "clean_start=True" not in keep + fresh
-    assert "db.begin_rule_rescan" in keep and "db.begin_rule_rescan" in fresh
-    assert "db.restart_rule_queue" in fresh
-    assert "db.restart_rule_queue" not in keep
-    assert "await _scan_rule_source(rule)" in keep and "await _scan_rule_source(rule)" in fresh
-    assert "db.mark_rule_messages_sent" not in keep
-    assert "db.rebuild_rule_keep_position" in keep
-    assert "saved_first_pending_message_id" in keep
-    assert "previous_sent" in keep
+    assert "db.clear_rule_deliveries" not in common
+    assert "clean_start=True" not in common
+    assert "db.begin_rule_rescan" in common
+    assert "db.restart_rule_queue" in common
+    assert "db.rebuild_rule_keep_position" in common
+    assert common.count("await _scan_rule_source(rule, rule_id, owner_token)") == 1
+    assert "db.mark_rule_messages_sent" not in common
+    assert 'operation["before_message_id"]' in common
+    assert common.index('operation["phase"] == "rebuilt"') < common.index("await _scan_rule_source")
 
 
 def test_repository_archives_attempt_keys_instead_of_deleting_history():
@@ -327,17 +323,15 @@ def test_rescan_batch_refresh_skips_recreating_old_delivery_rows():
     parser = Path("app/parser.py").read_text(encoding="utf-8")
     assert "preserve_existing_deliveries=True" in parser
     bot = Path("bot.py").read_text(encoding="utf-8")
-    fresh = bot.split("async def _run_rescan_rule_fresh_job(", 1)[1].split(
-        "async def _run_rescan_rule_keep_job(", 1
-    )[0]
-    keep = bot.split("async def _run_rescan_rule_keep_job(", 1)[1].split(
-        "\n@dataclass(slots=True)", 1
+    common = bot.split("async def _run_rescan_rule_job(", 1)[1].split(
+        "async def _rescan_recovery_loop(", 1
     )[0]
     shared = bot.split("async def _scan_rule_source(", 1)[1].split(
-        "async def _run_rescan_rule_fresh_job(", 1
+        "async def _verify_rescan_live_arrivals(", 1
     )[0]
     assert shared.count("preserve_existing_deliveries=True") == 2
-    assert "await _scan_rule_source(rule)" in fresh and "await _scan_rule_source(rule)" in keep
+    assert "RescanSourceWriter(db, rule_id, owner_token)" in shared
+    assert common.count("await _scan_rule_source(rule, rule_id, owner_token)") == 1
 
 
 class RescanCursor:
@@ -590,7 +584,7 @@ def test_scan_finish_sets_persistent_queue_marker_before_resuming():
     assert "WHERE id = %s AND rescan_owner_token = %s" in finish
     bot = Path("bot.py").read_text(encoding="utf-8")
     assert "db.restart_rule_queue" in bot
-    assert "queue_rebuilt=scan_complete" in bot
+    assert "queue_rebuilt=True" in bot and "queue_rebuilt=False" in bot
     assert "rescan_queue_built BOOLEAN NOT NULL DEFAULT FALSE" in source
     activate = source.split("def activate_rule_with_backfill(", 1)[1].split(
         "def get_rule_source_scope(", 1
@@ -629,14 +623,17 @@ def test_mid_scan_live_arrival_survives_replay_backfill():
     assert conn.cur.inserted == [1, 3, 4]
 
 
-def test_scan_high_water_is_captured_inside_keep_owner_finally_scope():
-    source = Path("bot.py").read_text(encoding="utf-8")
-    block = source.split("async def _run_rescan_rule_keep_job(", 1)[1].split(
-        "\n@dataclass(slots=True)", 1
+def test_scan_high_water_and_cursor_are_persisted_before_parser():
+    source = Path("app/postgres_repository.py").read_text(encoding="utf-8")
+    block = source.split("def begin_rule_rescan(", 1)[1].split(
+        "def _rescan_scope(", 1
     )[0]
-    assert "db.get_rule_scan_start_max_message_id" in block
-    assert block.index("        try:") < block.index("db.get_rule_scan_start_max_message_id")
-    assert "include_newer_than_message_id=scan_start_max_message_id" in block
+    assert block.index("FOR UPDATE") < block.index("self._rule_first_pending_message_id")
+    assert block.index("SELECT COALESCE(MAX(message_id),0) AS watermark") < block.index("SET rescan_operation=%s::jsonb")
+    assert block.index("SET rescan_operation=%s::jsonb") < block.index("conn.commit()")
+    bot = Path("bot.py").read_text(encoding="utf-8")
+    assert 'watermark = int(operation["watermark"])' in bot
+    assert "include_newer_than_message_id=watermark" in bot
 
 
 def test_fresh_replay_requires_one_time_db_confirmation():
@@ -715,11 +712,24 @@ def _load_rescan_handler(name, namespace):
     source = Path("bot.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lease(*args):
+        yield
+
+    async def db_write(run_db, func, *args, **kwargs):
+        return await run_db(func, *args, **kwargs)
+
+    namespace.setdefault("maintain_rescan_lease", lease)
+    namespace.setdefault("rescan_db", db_write)
     helpers = [n for n in tree.body
-               if isinstance(n, (ast.AsyncFunctionDef, ast.ClassDef))
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
                and n.name in {"_RescanReleaseFailed", "_finish_rule_rescan_with_retry",
                               "_report_rescan_release_failure", "_complete_rescan_job",
-                              "_report_rescan_unknown", "_write_rescan_audit"}]
+                              "_report_rescan_unknown", "_write_rescan_audit",
+                              "_run_rescan_rule_job", "_rule_rescan_scope"}
+               and n is not node]
     exec(compile(ast.Module(body=[*helpers, node], type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace[name]
 
@@ -775,8 +785,13 @@ def test_fresh_restart_reports_success_even_when_card_refresh_fails(release):
                                side_effect=RuntimeError("lost commit response") if release == "unknown" else None),
                            log_rule_change=Mock(), get_rule=Mock(return_value=rule),
                            begin_rule_rescan=Mock(return_value=(True, "owner")),
-                           get_rule_scan_start_max_message_id=Mock(return_value=525),
-                           finish_rule_rescan=Mock(side_effect={
+                           get_rule_rescan_operation=Mock(return_value={
+                               "mode": "fresh", "phase": "scanning", "attempt": 1,
+                               "was_active": True, "actor_id": 3,
+                               "scope": ["-100123", None, "-100456", None, "repost"],
+                               "watermark": 525, "before_message_id": None, "old_next_run_at": None,
+                           }),
+                           finish_rule_rescan=Mock(return_value=True, side_effect={
                                "ok": None,
                                "retry": [RuntimeError("connection"), None],
                                "failed": RuntimeError("connection"),
@@ -808,7 +823,7 @@ def test_fresh_restart_reports_success_even_when_card_refresh_fails(release):
         sleep.assert_awaited_once_with(1.0)
     else:
         sleep.assert_not_awaited()
-    scan.assert_awaited_once_with(rule)
+    scan.assert_awaited_once_with(rule, 94, "owner")
     repo.restart_rule_queue.assert_called_once_with(
         94, owner_token="owner", allowed_message_ids=set(range(1, 531)),
         include_newer_than_message_id=525, checked_missing_message_ids=set(),
@@ -878,13 +893,16 @@ def test_keep_rescan_post_commit_failure_still_reports_success(failure):
     repo = SimpleNamespace(
         get_rule=Mock(return_value=rule),
         begin_rule_rescan=Mock(return_value=(True, "owner")),
-        get_rule_scan_start_max_message_id=Mock(return_value=525),
-        get_rule_next_run_at=Mock(return_value="2026-11-26"),
-        get_rule_first_pending_message_id=Mock(return_value=100),
+        get_rule_rescan_operation=Mock(return_value={
+            "mode": "keep", "phase": "scanning", "attempt": 1,
+            "was_active": True, "actor_id": 3,
+            "scope": ["-100123", None, "-100456", None, "repost"],
+            "watermark": 525, "before_message_id": 100, "old_next_run_at": "2026-11-26",
+        }),
         rebuild_rule_keep_position=Mock(
             return_value=(5, 1, 0, 0),
             side_effect=RuntimeError("lost commit response") if failure == "unknown" else None),
-        finish_rule_rescan=Mock(side_effect={
+        finish_rule_rescan=Mock(return_value=True, side_effect={
             "release_retry": [RuntimeError("connection"), None],
             "release_failed": RuntimeError("connection"),
         }.get(failure)),
@@ -1074,3 +1092,83 @@ def test_verify_live_candidates_checks_deleted_and_present(wrong_id):
         assert asyncio.run(handler(214, rule, 102, observed)) == {103}
         assert observed == {101, 104}
     client.get_messages.assert_awaited_once_with("peer", ids=[103, 104])
+
+
+@pytest.mark.parametrize("phase,attempt,active", [
+    ("rebuilt", 2, True), ("rebuilt", 4, False), ("scanning", 4, True),
+])
+def test_recovered_committed_or_exhausted_operation_never_parses_again(phase, attempt, active):
+    import asyncio
+    import logging
+    from unittest.mock import AsyncMock, Mock
+    from app.rescan_safety import RescanBlocked
+
+    operation = {"mode": "fresh", "phase": phase, "attempt": attempt,
+                 "actor_id": 3, "was_active": active}
+    repo = SimpleNamespace(
+        claim_interrupted_rule_rescan=Mock(return_value=("new-owner", operation)),
+        finish_rule_rescan=Mock(return_value=active),
+        log_rule_change=Mock(), get_rule=Mock(), restart_rule_queue=Mock(),
+    )
+
+    async def run_db(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    scan, show = AsyncMock(), AsyncMock()
+    handler = _load_rescan_handler("_run_rescan_rule_job", {
+        "asyncio": asyncio, "db": repo, "run_db": run_db, "RescanBlocked": RescanBlocked,
+        "logger": logging.getLogger(__name__), "_scan_rule_source": scan,
+        "_show_rule_processing_screen": show, "invalidate_preview_cache": Mock(),
+        "invalidate_rule_card_cache": Mock(),
+    })
+    asyncio.run(handler(rule_id=94, recovery=True))
+    repo.finish_rule_rescan.assert_called_once_with(
+        94, was_active=active if phase == "rebuilt" else False,
+        owner_token="new-owner", queue_rebuilt=phase == "rebuilt",
+    )
+    repo.restart_rule_queue.assert_not_called()
+    repo.get_rule.assert_not_called()
+    scan.assert_not_awaited()
+    show.assert_not_awaited()
+
+
+def test_recovery_keeps_original_cursor_even_after_partial_history_scan():
+    import asyncio
+    import logging
+    from unittest.mock import AsyncMock, Mock
+    from app.rescan_safety import RescanBlocked
+
+    rule = SimpleNamespace(source_id="-100123", source_thread_id=None,
+                           target_id="-100456", target_thread_id=None, mode="repost")
+    operation = {"mode": "keep", "phase": "scanning", "attempt": 2,
+                 "actor_id": 3, "was_active": True,
+                 "scope": ["-100123", None, "-100456", None, "repost"],
+                 "watermark": 525, "before_message_id": 100, "old_next_run_at": "2026-11-26"}
+    repo = SimpleNamespace(
+        claim_interrupted_rule_rescan=Mock(return_value=("new-owner", operation)),
+        finish_rule_rescan=Mock(return_value=True), log_rule_change=Mock(),
+        get_rule=Mock(return_value=rule), rebuild_rule_keep_position=Mock(return_value=(5, 1, 2, 0)),
+    )
+
+    async def run_db(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    scan, show = AsyncMock(return_value=(5, {1, 100, 526})), AsyncMock()
+    handler = _load_rescan_handler("_run_rescan_rule_job", {
+        "asyncio": asyncio, "db": repo, "run_db": run_db, "RescanBlocked": RescanBlocked,
+        "logger": logging.getLogger(__name__), "_scan_rule_source": scan,
+        "_verify_rescan_live_arrivals": AsyncMock(return_value=set()),
+        "cancel_local_rule_delivery_jobs": Mock(), "_show_rule_processing_screen": show,
+        "invalidate_preview_cache": Mock(), "invalidate_rule_card_cache": Mock(),
+    })
+    asyncio.run(handler(rule_id=94, recovery=True))
+    scan.assert_awaited_once_with(rule, 94, "new-owner")
+    repo.rebuild_rule_keep_position.assert_called_once_with(
+        94, before_message_id=100, owner_token="new-owner", allowed_message_ids={1, 100, 526},
+        include_newer_than_message_id=525, checked_missing_message_ids=set(),
+        expected_scope=("-100123", None, "-100456", None, "repost"),
+    )
+    repo.finish_rule_rescan.assert_called_once_with(
+        94, was_active=True, owner_token="new-owner", queue_rebuilt=True,
+    )
+    show.assert_not_awaited()

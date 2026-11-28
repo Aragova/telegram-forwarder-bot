@@ -74,3 +74,9 @@ Fresh создаёт новый цикл всех исходных публик�
 неполного альбома возможен повтор уже опубликованных элементов; не включайте
 правило без проверки выбранной позиции и получателя. Запрещено вручную сбрасывать
 статусы в pending для прохождения сверки.
+
+
+The subsequent P0.12/P0.9 changes join scheduler admission before draining
+workers, cancel and join rescan tasks with a durable recovery record, and
+retry incomplete worker/campaign drains without returning from main.
+See [durable rescan and shutdown](durable-rescan-shutdown.md).

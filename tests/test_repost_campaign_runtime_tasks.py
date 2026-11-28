@@ -298,7 +298,7 @@ def test_bot_polling_preserves_session_until_campaign_shutdown():
     assert session_options[0].value is False
 
 
-def test_incomplete_campaign_drain_continues_cleanup_without_closing_telegram_clients():
+def test_incomplete_campaign_drain_retries_before_closing_telegram_clients():
     import ast
     from pathlib import Path
 
@@ -311,7 +311,10 @@ def test_incomplete_campaign_drain_continues_cleanup_without_closing_telegram_cl
 
     async def fail_drain():
         events.append("campaign_stop")
-        raise RuntimeError("in-flight Telegram RPC")
+        if events.count("campaign_stop") == 1:
+            raise RuntimeError("in-flight Telegram RPC")
+        assert "telethon_disconnect" not in events
+        assert "bot_session_close" not in events
 
     async def record(name):
         events.append(name)
@@ -331,6 +334,8 @@ def test_incomplete_campaign_drain_continues_cleanup_without_closing_telegram_cl
         "channel_title_sync_task": None,
         "repost_campaign_runtime_tasks": campaign,
         "scheduler_runtime_task": None,
+        "rescan_recovery_task": None,
+        "rule_ui_tasks": {},
         "job_watchdog_task": None,
         "reaction_worker_task": None,
         "sender_service": SimpleNamespace(video_processor=SimpleNamespace(
@@ -347,14 +352,15 @@ def test_incomplete_campaign_drain_continues_cleanup_without_closing_telegram_cl
         stop_workers_runtime=False, close_dashboard_tasks=True,
         close_telegram_clients=True, close_bot_session=True,
     ))
-    assert result is False
+    assert result is True
+    assert events.count("campaign_stop") == 2
     assert "background_cleanup" in events and "processor_cleanup" in events
-    assert "telethon_disconnect" not in events
-    assert "reaction_disconnect" not in events
-    assert "bot_session_close" not in events
-    assert ctx["repost_campaign_runtime_tasks"] is campaign
-    assert ctx["telethon_client"] is raw_telethon
-    assert ctx["bot"] is raw_bot
+    assert events.index("telethon_disconnect") > events.index("campaign_stop")
+    assert "reaction_disconnect" in events
+    assert "bot_session_close" in events
+    assert ctx["repost_campaign_runtime_tasks"] is None
+    assert ctx["telethon_client"] is None
+    assert ctx["bot"] is None
 
 
 def test_main_preserves_original_role_error_when_shutdown_is_incomplete():

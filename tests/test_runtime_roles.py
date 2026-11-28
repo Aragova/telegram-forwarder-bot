@@ -193,6 +193,7 @@ def test_runtime_role_owns_polling_and_job_workers(role, owns_polling, owns_work
             "watchdog_loop": AsyncMock(), "start_background_task": discard_background,
             "_start_repost_campaign_runtime_tasks": lambda **kwargs: None,
             "_start_channel_title_sync_runtime": lambda: None,
+            "_start_rescan_recovery_runtime": lambda: None,
             "ReactionWorker": lambda **kwargs: SimpleNamespace(run_forever=AsyncMock()),
             "run_light_worker": light, "run_heavy_worker": heavy,
         }

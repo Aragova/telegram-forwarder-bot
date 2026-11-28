@@ -210,3 +210,12 @@ def test_outer_drain_deadline_keeps_worker_visible_during_blocked_thread_cleanup
         assert parent.cancelled() and task.done()
 
     asyncio.run(scenario())
+
+
+def test_shutdown_stops_scheduler_and_rescan_before_draining_workers():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    shutdown = source[source.index("async def _shutdown_runtime("):
+                      source.index("async def _run_scheduler_role_loop()")]
+    assert shutdown.index("await asyncio.gather(scheduler_runtime_task") < shutdown.index("await stop_job_workers_runtime()")
+    assert shutdown.index("await asyncio.gather(rescan_recovery_task") < shutdown.index("await stop_job_workers_runtime()")
+    assert shutdown.index("await stop_job_workers_runtime()") < shutdown.index("await raw_telethon.disconnect()")
