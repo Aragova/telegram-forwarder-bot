@@ -12,7 +12,8 @@ EnvironmentFile=/etc/forwarder-bot/forwarder.env
 ExecStart=/usr/bin/python3 /opt/telegram-forwarder-bot/bot.py --role scheduler
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=45
+# Allow fenced DB operations to settle before systemd sends SIGKILL.
+TimeoutStopSec=720
 KillSignal=SIGINT
 
 [Install]
