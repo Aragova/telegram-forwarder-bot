@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -22,9 +23,8 @@ def test_rule_channel_choice_label(title, thread_id, expected):
     assert format_rule_channel_choice(title, thread_id) == expected
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["rf:add", "rf:add_in:9"])
-async def test_admin_folder_rule_source_picker_distinguishes_topics(monkeypatch, action):
+def test_admin_folder_rule_source_picker_distinguishes_topics(monkeypatch, action):
     user_id = 990029
     rows = [
         {"channel_id": "-1001", "thread_id": 125, "title": "Тайная"},
@@ -59,7 +59,7 @@ async def test_admin_folder_rule_source_picker_distinguishes_topics(monkeypatch,
     )
 
     try:
-        await dp.callback_query.handlers[0].callback(callback)
+        asyncio.run(dp.callback_query.handlers[0].callback(callback))
         keyboard = ctx.send_message_safe.await_args.kwargs["reply_markup"].keyboard
         assert [row[0].text for row in keyboard] == [
             "📤 1. Тайная · ID темы: 125",
