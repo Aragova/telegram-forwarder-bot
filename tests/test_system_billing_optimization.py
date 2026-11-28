@@ -74,3 +74,33 @@ def test_billing_edit_callbacks_reject_invalid_data_and_keep_cancel():
     assert ctx.user_states[1]["period_months"] == 1
     kb = ctx.edit_message_text_safe.call_args.kwargs["reply_markup"]
     assert kb.inline_keyboard[0][0].callback_data == "admin_billing_usd_plan:basic"
+
+
+def test_unknown_heavy_counts_fail_closed():
+    repo = Mock()
+    service = TenantFairnessService(repo)
+    for bad in (None, {}, {"pending": -1, "processing": 0, "retry": 0},
+                {"pending": 0, "processing": None, "retry": 0}):
+        repo.get_tenant_heavy_admission_counts.return_value = bad
+        assert _video_tenant_throttled(repo, service, 1, "degraded")
+    repo.get_tenant_heavy_admission_counts.side_effect = RuntimeError("database unavailable")
+    assert _video_tenant_throttled(repo, service, 1, "degraded")
+    repo.get_active_subscription.assert_not_called()
+
+
+def test_scheduler_missing_video_snapshot_keeps_other_rules(monkeypatch):
+    import asyncio
+    from app import scheduler_runtime
+
+    repo = Mock()
+    repo.get_all_rules.return_value = [
+        SimpleNamespace(id=1, is_active=True, mode="video"),
+        SimpleNamespace(id=2, is_active=True, mode="repost"),
+    ]
+    repo.mark_expired_campaign_top_time_pauses_completed.return_value = 0
+    repo.get_due_delivery.return_value = None
+    monkeypatch.setattr(scheduler_runtime, "build_worker_load_snapshot", lambda *_: None)
+    result = asyncio.run(scheduler_runtime.scheduler_tick(repo))
+    assert result == {"created": 0, "duplicates": 0, "checked_rules": 1}
+    assert repo.get_due_delivery.call_count == 1
+    assert repo.get_due_delivery.call_args.args[0] == 2

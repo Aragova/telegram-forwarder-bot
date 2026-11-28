@@ -137,16 +137,18 @@ def _build_tariff_prices_kb() -> InlineKeyboardMarkup:
 def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) -> None:
     @dp.message(lambda m: _normalize_button_text(m.text) in {"⚙ Система", "Система"})
     async def handle_system_menu(message: Message):
-        ctx.reset_user_state(message.from_user.id if message.from_user else None)
         if not await ctx.is_admin(message):
             return
+        if message.from_user:
+            ctx.reset_user_state(message.from_user.id)
         await ctx.send_message_safe(chat_id=message.chat.id, text="⚙️ Раздел: Система", reply_markup=ctx.get_system_menu())
 
     @dp.message(lambda m: _normalize_button_text(m.text) == "💳 Биллинг и тарифы")
     async def handle_billing_home(message: Message):
         if not await ctx.is_admin(message):
             return
-        ctx.reset_user_state(message.from_user.id if message.from_user else None)
+        if message.from_user:
+            ctx.reset_user_state(message.from_user.id)
         await ctx.send_message_safe(chat_id=message.chat.id, text=BILLING_HOME_TEXT,
                                     parse_mode="HTML", reply_markup=_billing_home_kb())
 
@@ -174,21 +176,24 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
     async def handle_billing_rates_menu(message: Message):
         if not await ctx.is_admin(message):
             return
-        ctx.reset_user_state(message.from_user.id if message.from_user else None)
+        if message.from_user:
+            ctx.reset_user_state(message.from_user.id)
         await ctx.send_message_safe(chat_id=message.chat.id, text=await ctx.run_db(_build_rates_text, ctx), parse_mode="HTML", reply_markup=_build_rates_kb())
 
     @dp.message(lambda m: _normalize_button_text(m.text) == "💫 Фикс-цены Stars/Crypto")
     async def handle_billing_fixed_menu(message: Message):
         if not await ctx.is_admin(message):
             return
-        ctx.reset_user_state(message.from_user.id if message.from_user else None)
+        if message.from_user:
+            ctx.reset_user_state(message.from_user.id)
         await ctx.send_message_safe(chat_id=message.chat.id, text=await ctx.run_db(_build_fixed_prices_text, ctx), parse_mode="HTML", reply_markup=_build_fixed_prices_kb())
 
     @dp.message(lambda m: _normalize_button_text(m.text) == "💵 Цены тарифов")
     async def handle_billing_usd_menu(message: Message):
         if not await ctx.is_admin(message):
             return
-        ctx.reset_user_state(message.from_user.id if message.from_user else None)
+        if message.from_user:
+            ctx.reset_user_state(message.from_user.id)
         await ctx.send_message_safe(chat_id=message.chat.id, text=await ctx.run_db(_build_tariff_prices_text, ctx), parse_mode="HTML", reply_markup=_build_tariff_prices_kb())
 
     @dp.callback_query(lambda c: c.data == "admin_billing_usd")
@@ -450,5 +455,6 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
     async def handle_back_to_menu(message: Message):
         if not await ctx.is_admin(message):
             return
-        ctx.reset_user_state(message.from_user.id if message.from_user else None)
+        if message.from_user:
+            ctx.reset_user_state(message.from_user.id)
         await ctx.send_message_safe(chat_id=message.chat.id, text="📋 Главное меню", reply_markup=ctx.get_main_menu())

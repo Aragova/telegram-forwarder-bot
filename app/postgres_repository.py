@@ -8822,7 +8822,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                       AND j.status IN ('pending','retry','leased','processing')
                     """, (int(tenant_id),))
                 row = cur.fetchone()
-        return {key: int(row[key] or 0) for key in ("pending", "processing", "retry")}
+        # COUNT without GROUP BY must yield one row even for an empty queue.
+        # Missing data is not evidence that capacity is available.
+        if row is None:
+            raise RuntimeError("Heavy admission aggregate returned no row")
+        return {key: int(row[key]) for key in ("pending", "processing", "retry")}
 
     def get_tenant_job_counts(self, queue: str | None = None) -> dict[int, int]:
         queue_name = str(queue or "").strip().lower()

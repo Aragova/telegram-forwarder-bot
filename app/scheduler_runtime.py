@@ -67,8 +67,18 @@ _last_usage_reset_day: str | None = None
 
 def _video_tenant_throttled(repo, fairness_service, tenant_id, system_mode):
     if hasattr(repo, "get_tenant_heavy_admission_counts"):
-        counts = repo.get_tenant_heavy_admission_counts(tenant_id)
-        pending, processing, retry = (int(counts.get(key) or 0) for key in ("pending", "processing", "retry"))
+        try:
+            counts = repo.get_tenant_heavy_admission_counts(tenant_id)
+        except Exception:
+            logger.warning("Scheduler: ошибка чтения счётчиков heavy tenant_id=%s", tenant_id, exc_info=True)
+            return True
+        if not isinstance(counts, dict) or any(
+            type(counts.get(key)) is not int or counts[key] < 0
+            for key in ("pending", "processing", "retry")
+        ):
+            logger.warning("Scheduler: недоступны счётчики heavy tenant_id=%s", tenant_id)
+            return True
+        pending, processing, retry = (counts[key] for key in ("pending", "processing", "retry"))
     else:
         pending = int((repo.get_tenant_job_counts(queue="heavy") if hasattr(repo, "get_tenant_job_counts") else {}).get(tenant_id) or 0)
         processing = int((repo.get_tenant_processing_counts(queue="heavy") if hasattr(repo, "get_tenant_processing_counts") else {}).get(tenant_id) or 0)
@@ -106,8 +116,13 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
             continue
 
         rule_mode = (getattr(rule, "mode", "repost") or "repost").strip().lower()
+        load_mode = "normal"
         if rule_mode == "video":
             load = await asyncio.to_thread(build_worker_load_snapshot, repo, POLICY)
+            if load is None or getattr(load, "mode", None) not in {"normal", "degraded", "saturated"}:
+                logger.warning("Scheduler: недоступен снимок нагрузки rule_id=%s", int(rule.id))
+                continue
+            load_mode = load.mode
             if load.heavy_hard_limit_exceeded:
                 logger.warning(
                     "Новый heavy job не поставлен из-за saturation | rule_id=%s | heavy_pending=%s | hard_limit=%s",
@@ -183,8 +198,8 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
 
         # Only video rules can be deferred by this check, and normal mode
         # always allows them. Preserve per-tenant backpressure in degraded mode.
-        if rule_mode == "video" and str(load.mode or "normal").strip().lower() != "normal":
-            if await asyncio.to_thread(_video_tenant_throttled, repo, fairness_service, tenant_id, load.mode):
+        if rule_mode == "video" and load_mode != "normal":
+            if await asyncio.to_thread(_video_tenant_throttled, repo, fairness_service, tenant_id, load_mode):
                 logger.warning("Scheduler временно ограничил tenant #%s: превышена нагрузка", tenant_id)
                 continue
 
