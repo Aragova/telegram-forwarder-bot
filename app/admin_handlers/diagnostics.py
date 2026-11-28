@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from html import escape
+import re
 from time import monotonic
 from traceback import extract_tb
 from uuid import uuid4
@@ -34,22 +36,64 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         await ctx.send_message_safe(chat_id=message.chat.id, text=current["text"], parse_mode="HTML", reply_markup=ctx.build_faulty_inline_keyboard(page, total_pages, current["delivery_id"], rule_id=current["rule_id"]))
 
 
-    @dp.message(lambda m: m.text == "📊 Диагностика доставки")
+    @dp.message(lambda m: (m.text or "").strip() in {"⚠️ Центр ошибок", "📊 Диагностика доставки"})
     async def handle_delivery_diagnostics(message: Message):
         ctx.reset_user_state(message.from_user.id if message.from_user else None)
         if not await ctx.is_admin(message):
             return
+        text, markup = await center_payload()
+        await ctx.send_message_safe(chat_id=message.chat.id, text=text, parse_mode="HTML", reply_markup=markup)
+
+    async def center_payload():
         try:
-            text = await ctx.build_delivery_diagnostics_admin_text()
-        except Exception:
-            ctx.logger.warning("Ошибка подготовки диагностики доставки", exc_info=True)
-            text = (
-                "<b>📊 Диагностика доставки</b>\n\n"
-                "⚪ <b>Диагностика недоступна</b>\n\n"
-                "Не удалось получить данные.\n\n"
-                "🔄 Попробуйте обновить диагностику позже."
+            counts = await ctx.run_db(
+                ctx.db.get_diagnostics_center_snapshot,
+                older_than_seconds=DeliveryObservabilityConfig().stale_processing_after_seconds,
             )
-        await ctx.send_message_safe(chat_id=message.chat.id, text=text, parse_mode="HTML")
+        except Exception:
+            ctx.logger.warning("Ошибка центра диагностики", exc_info=True)
+            counts = None
+        return _center_payload(counts)
+
+    @dp.callback_query(lambda c: c.data == "diag_center")
+    async def handle_center_refresh(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        await ctx.answer_callback_safe_once(callback)
+        text, markup = await center_payload()
+        await ctx.edit_message_text_safe(message=callback.message, text=text, parse_mode="HTML", reply_markup=markup)
+
+    async def stale_payload():
+        rows = await ctx.run_db(
+            ctx.db.get_stuck_processing_deliveries,
+            older_than_seconds=DeliveryObservabilityConfig().stale_processing_after_seconds, limit=50,
+        )
+        return _format_stuck_processing_deliveries_text(rows), _build_stuck_processing_keyboard(rows)
+
+    @dp.callback_query(lambda c: c.data == "diag_stale")
+    async def handle_center_stale(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        await ctx.answer_callback_safe_once(callback)
+        text, markup = await stale_payload()
+        await ctx.edit_message_text_safe(message=callback.message, text=text, parse_mode="HTML", reply_markup=markup)
+
+    @dp.callback_query(lambda c: c.data and c.data.startswith("diag_review:"))
+    async def handle_center_review(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        try:
+            _, category, raw_offset = callback.data.split(":")
+            offset = int(raw_offset)
+            if category not in {"receipts", "cooldowns"} or not 0 <= offset < 2**31:
+                raise ValueError
+        except (ValueError, TypeError):
+            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
+            return
+        await ctx.answer_callback_safe_once(callback)
+        rows = await ctx.run_db(ctx.db.get_diagnostics_review_rows, category, limit=10, offset=offset)
+        text, markup = _review_payload(category, rows, offset)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, parse_mode="HTML", reply_markup=markup)
 
 
     @dp.message(lambda m: (m.text or "").strip() == "🧯 Зависшие задачи")
@@ -57,10 +101,8 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         ctx.reset_user_state(message.from_user.id if message.from_user else None)
         if not await ctx.is_admin(message):
             return
-        stale_seconds = DeliveryObservabilityConfig().stale_processing_after_seconds
-        rows = await ctx.run_db(ctx.db.get_stuck_processing_deliveries, older_than_seconds=stale_seconds, limit=50)
-        text = ctx.format_stuck_processing_deliveries_text(rows) if ctx.format_stuck_processing_deliveries_text else _format_stuck_processing_deliveries_text(rows)
-        await ctx.send_message_safe(chat_id=message.chat.id, text=text, reply_markup=_build_stuck_processing_keyboard(bool(rows)))
+        text, markup = await stale_payload()
+        await ctx.send_message_safe(chat_id=message.chat.id, text=text, parse_mode="HTML", reply_markup=markup)
         orphans = await ctx.run_db(ctx.db.get_orphaned_processing_rules, limit=10)
         if orphans:
             await ctx.send_message_safe(
@@ -122,7 +164,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
             await ctx.answer_callback_safe(callback, "Подтверждение устарело. Откройте диагностику заново.", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback, "Отменено")
-        await ctx.edit_message_text_safe(message=callback.message, text="<b>🧯 Действие отменено</b>", parse_mode="HTML")
+        await ctx.edit_message_text_safe(message=callback.message, text="<b>🧯 Действие отменено</b>", parse_mode="HTML", reply_markup=_back_to_center())
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("stuck_orphan_confirm:"))
     async def handle_stuck_orphan_confirm(callback: CallbackQuery):
@@ -157,7 +199,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         await ctx.edit_message_text_safe(
             message=callback.message,
             text=f"<b>🧯 Правило #{rule_id}</b>\n\n<b>Результат</b>\n{message}",
-            parse_mode="HTML",
+            parse_mode="HTML", reply_markup=_back_to_center(),
         )
 
     @dp.callback_query(lambda c: c.data == "stuck_reset_request")
@@ -203,7 +245,7 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         await ctx.edit_message_text_safe(
             message=callback.message,
             text=f"<b>🧯 Зависшие задачи</b>\n\n<b>Результат</b>\nВосстановлено заданий: {updated}.{tail}",
-            parse_mode="HTML",
+            parse_mode="HTML", reply_markup=_back_to_center(),
         )
 
     @dp.callback_query(lambda c: c.data == "stuck_reset_cancel")
@@ -214,82 +256,58 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         await ctx.edit_message_text_safe(
             message=callback.message,
             text="<b>🧯 Зависшие задачи</b>\n\nДействие отменено. Возврат в очередь не выполнялся.",
-            parse_mode="HTML",
+            parse_mode="HTML", reply_markup=_back_to_center(),
         )
 
-    @dp.message(lambda m: m.text == "📊 Журнал системы")
+    async def journal_payload(category, page):
+        pages = await ctx.run_db(ctx.build_system_journal_pages, 300, category=category)
+        total = len(pages)
+        page = ctx.clamp_page(page, total)
+        current = pages[page]
+        return current["text"], ctx.build_system_journal_inline_keyboard(
+            page, total, category=category, rule_id=current["rule_id"],
+        )
+
+    @dp.message(lambda m: (m.text or "").strip() in {"📊 Журнал событий", "📊 Журнал системы"})
     async def handle_system_journal(message: Message):
         ctx.reset_user_state(message.from_user.id if message.from_user else None)
         if not await ctx.is_admin(message):
             return
-        pages = await ctx.run_db(ctx.build_system_journal_pages, 300)
-        page = 0
-        total_pages = len(pages)
-        await ctx.send_message_safe(chat_id=message.chat.id, text=pages[page], parse_mode="HTML", reply_markup=ctx.build_system_journal_inline_keyboard(page, total_pages))
+        text, markup = await journal_payload("all", 0)
+        await ctx.send_message_safe(chat_id=message.chat.id, text=text, parse_mode="HTML", reply_markup=markup)
 
+    # Old reply keyboards can survive a deployment; route them away from the
+    # retired test screen without retaining any test publication functionality.
     @dp.message(lambda m: m.text == "🎨 Тест styled-кнопок")
-    async def handle_styled_buttons_test(message: Message):
-        ctx.reset_user_state(message.from_user.id if message.from_user else None)
+    async def handle_retired_test(message: Message):
         if not await ctx.is_admin(message):
             return
-        markup = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="Primary", style="primary", callback_data="styled_test_primary"),
-                    InlineKeyboardButton(text="Success", style="success", callback_data="styled_test_success"),
-                ],
-                [
-                    InlineKeyboardButton(text="Danger", style="danger", callback_data="styled_test_danger"),
-                ],
-            ]
-        )
-        await ctx.send_message_safe(chat_id=message.chat.id, text=
-            "🎨 Тест styled-кнопок (только для ADMIN_ID).\n"
-            "Если цвета не отображаются, остаёмся на emoji-style.",
-            reply_markup=markup,
-        )
+        ctx.reset_user_state(message.from_user.id if message.from_user else None)
+        await ctx.send_message_safe(chat_id=message.chat.id, text="Раздел обновлён.", reply_markup=ctx.get_diagnostics_menu())
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("styled_test_"))
-    async def handle_styled_buttons_test_callback(callback: CallbackQuery):
+    async def handle_retired_test_callback(callback: CallbackQuery):
         if not await ctx.is_admin_callback(callback):
             return
-        await ctx.answer_callback_safe_once(callback, "✅ Нажатие получено")
+        await ctx.answer_callback_safe(callback, "Кнопка устарела.", show_alert=True)
 
-    @dp.callback_query(lambda c: c.data == "syslog_page_info")
-    async def handle_syslog_page_info(callback: CallbackQuery):
-        await ctx.answer_callback_safe_once(callback)
+    @dp.callback_query(lambda c: c.data in {"syslog_page_info", "faulty_page_info"})
+    async def handle_page_info(callback: CallbackQuery):
+        if await ctx.is_admin_callback(callback):
+            await ctx.answer_callback_safe_once(callback)
 
-    @dp.callback_query(lambda c: c.data and c.data.startswith("syslog_page:"))
-    async def handle_syslog_page(callback: CallbackQuery):
-        if not await ctx.is_admin_callback(callback):
-            return
-        try:
-            _, page_raw = ctx.parse_callback_parts(callback.data, "syslog_page", 2)
-            page = int(page_raw)
-        except Exception:
-            await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-            return
-        await ctx.answer_callback_safe_once(callback)
-        pages = await ctx.run_db(ctx.build_system_journal_pages, 300)
-        total_pages = len(pages)
-        page = ctx.clamp_page(page, total_pages)
-        await ctx.edit_message_text_safe(message=callback.message, text=pages[page], parse_mode="HTML", reply_markup=ctx.build_system_journal_inline_keyboard(page, total_pages))
-
-    @dp.callback_query(lambda c: c.data and c.data.startswith("syslog_refresh:"))
-    async def handle_syslog_refresh(callback: CallbackQuery):
+    @dp.callback_query(lambda c: c.data and c.data.startswith(("syslog_page:", "syslog_refresh:", "syslog_filter:")))
+    async def handle_system_journal_navigation(callback: CallbackQuery):
         if not await ctx.is_admin_callback(callback):
             return
         try:
-            _, page_raw = ctx.parse_callback_parts(callback.data, "syslog_refresh", 2)
-            page = int(page_raw)
-        except Exception:
+            category, page = _parse_journal_callback(callback.data)
+        except (ValueError, TypeError):
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback)
-        pages = await ctx.run_db(ctx.build_system_journal_pages, 300)
-        total_pages = len(pages)
-        page = ctx.clamp_page(page, total_pages)
-        await ctx.edit_message_text_safe(message=callback.message, text=pages[page], parse_mode="HTML", reply_markup=ctx.build_system_journal_inline_keyboard(page, total_pages))
+        text, markup = await journal_payload(category, page)
+        await ctx.edit_message_text_safe(message=callback.message, text=text, parse_mode="HTML", reply_markup=markup)
 
     @dp.callback_query(lambda c: c.data == "syslog_back")
     async def handle_syslog_back(callback: CallbackQuery):
@@ -298,10 +316,6 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         await ctx.answer_callback_safe_once(callback)
         await ctx.edit_message_text_safe(message=callback.message, text="⚠️ Раздел: Диагностика")
         await ctx.send_message_safe(chat_id=callback.message.chat.id, text="⚠️ Раздел: Диагностика", reply_markup=ctx.get_diagnostics_menu())
-
-    @dp.callback_query(lambda c: c.data == "faulty_page_info")
-    async def handle_faulty_page_info(callback: CallbackQuery):
-        await ctx.answer_callback_safe_once(callback)
 
     @dp.callback_query(lambda c: c.data and c.data.startswith("faulty_page:"))
     async def handle_faulty_page(callback: CallbackQuery):
@@ -371,8 +385,8 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
         if not await ctx.is_admin_callback(callback):
             return
         await ctx.answer_callback_safe_once(callback)
-        await ctx.edit_message_text_safe(message=callback.message, text="⚠️ Раздел: Диагностика")
-        await ctx.send_message_safe(chat_id=callback.message.chat.id, text="⚠️ Раздел: Диагностика", reply_markup=ctx.get_diagnostics_menu())
+        text, markup = await center_payload()
+        await ctx.edit_message_text_safe(message=callback.message, text=text, parse_mode="HTML", reply_markup=markup)
 
 
 def _duration_ru(seconds: object) -> str:
@@ -387,32 +401,106 @@ def _duration_ru(seconds: object) -> str:
     return f"{hours} ч {minutes} мин"
 
 
+def _back_to_center():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Центр ошибок", callback_data="diag_center")],
+    ])
+
+
+def _center_payload(counts):
+    labels = (
+        ("⚠️ Проблемные доставки", "faulty", "faulty_page:0"),
+        ("🧯 Зависшие задания", "stale_jobs", "diag_stale"),
+        ("🔧 Правила без задания", "orphan_rules", "stuck_orphan_page:0"),
+        ("🔎 Неподтверждённые публикации", "receipts", "diag_review:receipts:0"),
+        ("⏳ Активные ограничения Telegram", "cooldowns", "diag_review:cooldowns:0"),
+    )
+    lines = ["<b>⚠️ ЦЕНТР ОШИБОК</b>", ""]
+    buttons = []
+    if counts is None:
+        lines.extend(["⚪ <b>Данные недоступны</b>", "Обновите диагностику."])
+    else:
+        lines.append("🟡 Требуется внимание" if any(counts.values()) else "🟢 Проблем не найдено")
+        lines.append("")
+    for title, key, callback in labels:
+        value = "—" if counts is None else str(int(counts[key]))
+        lines.append(f"{title}: <b>{value}</b>")
+        buttons.append([InlineKeyboardButton(text=f"{title} ({value})", callback_data=callback)])
+    lines.extend(["", "Доставки считаются по записям, задания — по ID, осиротевшие — по правилам.",
+                  "Ограничения — по активным областям Telegram; не число задержанных постов."])
+    buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="diag_center")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _parse_journal_callback(data):
+    parts = data.split(":")
+    if len(parts) == 2 and parts[0] == "syslog_filter":
+        category, page = parts[1], 0
+    elif len(parts) == 2 and parts[0] in {"syslog_page", "syslog_refresh"}:
+        category, page = "all", int(parts[1])
+    elif len(parts) == 3 and parts[0] in {"syslog_page", "syslog_refresh"}:
+        category, page = parts[1], int(parts[2])
+    else:
+        raise ValueError("Invalid journal callback")
+    if category not in {"all", "errors", "publications", "admin"} or not 0 <= page < 2**31:
+        raise ValueError("Invalid journal page")
+    return category, page
+
+
+def _review_payload(category, rows, offset):
+    receipt = category == "receipts"
+    lines = ["<b>🔎 Неподтверждённые публикации</b>" if receipt else "<b>⏳ Ограничения Telegram</b>", ""]
+    buttons = []
+    if not rows:
+        lines.append("Записей на этой странице нет.")
+    for row in rows:
+        if receipt:
+            rule_id = int(row["rule_id"])
+            source = ", ".join(str(int(mid)) for mid in row["source_message_ids"])
+            status = "Срок истёк — требуется сверка" if row["expired"] else "Ожидает подтверждения"
+            lines.extend([f"<b>Правило #{rule_id}</b> · {status}", f"Исходные сообщения: {source}", ""])
+            buttons.append([InlineKeyboardButton(text=f"📂 Правило #{rule_id}", callback_data=f"rule_card:{rule_id}")])
+        else:
+            # Scope keys must not expose arbitrary secret-bearing strings.
+            scope = str(row["scope_key"])
+            label = scope if re.fullmatch(r"(?:mtproto|bot):\d+(?::-?\d+)?", scope) else "Другая область"
+            lines.append(f"• {escape(label)} — <b>{_duration_ru(row['seconds'])}</b>")
+    lines.extend(["", "Не отправляйте повторно без сверки с получателем." if receipt else "Ограничение снимается автоматически по истечении срока."])
+    nav = []
+    if offset:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"diag_review:{category}:{max(0, offset-10)}"))
+    if len(rows) == 10:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"diag_review:{category}:{offset+10}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"diag_review:{category}:{offset}")])
+    buttons.extend(_back_to_center().inline_keyboard)
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 def _format_stuck_processing_deliveries_text(rows) -> str:
     rows = list(rows or [])
-    lines = ["🧯 Зависшие задачи", "", f"Найдено: {len(rows)}"]
+    lines = ["<b>🧯 Зависшие задания</b>", "", f"Записей на экране: <b>{len(rows)}</b> (до 50)"]
     if not rows:
-        lines.extend(["", "Зависшие задачи не найдены."])
-        return "\n".join(lines)
-    for index, row in enumerate(rows, start=1):
-        lines.extend([
-            "",
-            f"{index}) Доставка №{row.get('delivery_id')}",
-            f"Правило #{row.get('rule_id')}",
-            f"Висит: {_duration_ru(row.get('age_seconds'))}",
-            f"Пост: {row.get('post_id')}",
-        ])
+        lines.extend(["", "Устаревшие задания не найдены."])
+    for row in rows:
+        lines.append(f"• Правило #{int(row['rule_id'])} · доставка {int(row['delivery_id'])} · {_duration_ru(row['age_seconds'])}")
     lines.extend([
         "",
         "Можно восстановить существующие задания с истёкшей арендой или устаревшим heartbeat.",
         "Это не сбрасывает статусы публикаций и не разрешает повторную отправку без проверки.",
     ])
-    return "\n".join(lines)[:4000]
+    return "\n".join(lines)
 
 
-def _build_stuck_processing_keyboard(has_rows: bool) -> InlineKeyboardMarkup | None:
-    if not has_rows:
-        return None
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Восстановить задания", callback_data="stuck_reset_request")]])
+def _build_stuck_processing_keyboard(rows) -> InlineKeyboardMarkup:
+    buttons = []
+    if rows:
+        buttons.append([InlineKeyboardButton(text="🔁 Восстановить задания", callback_data="stuck_reset_request")])
+        for rule_id in sorted({int(row["rule_id"]) for row in rows}):
+            buttons.append([InlineKeyboardButton(text=f"📂 Правило #{rule_id}", callback_data=f"rule_card:{rule_id}")])
+    buttons.extend(_back_to_center().inline_keyboard)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def _build_stuck_reset_confirm_keyboard() -> InlineKeyboardMarkup:
@@ -471,6 +559,7 @@ def _orphan_page_keyboard(rows, cursor: int) -> InlineKeyboardMarkup:
         navigation.append(InlineKeyboardButton(text="Далее", callback_data=f"stuck_orphan_page:{int(rows[-1]['rule_id'])}"))
     if navigation:
         buttons.append(navigation)
+    buttons.extend(_back_to_center().inline_keyboard)
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 

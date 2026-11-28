@@ -40,27 +40,27 @@ def _base_snapshot(**overrides):
 
 def test_repost_card_text_contains_required_blocks():
     text = user_ui.build_user_rule_card_text(_base_snapshot())
-    assert "⚙️ Правило #" in text
+    assert "⚙️ <b>Правило #" in text
     assert "👉" in text
     assert "Работает · Репост" in text
-    assert "Ждёт до" in text
-    assert "В очереди" in text
-    assert "В обработке" in text
+    assert "Ближайшая отправка" in text
+    assert "Очередь" in text
+    assert "Обработка" in text
     assert "Отправлено" in text
     assert "Ошибки" in text
     assert "Позиция" in text
-    assert "Подпись" in text
-    assert "──────────────" in text
+    assert "Подпись" not in text
+    assert "──────────────" not in text
 
 
 def test_video_card_text_contains_required_blocks():
     text = user_ui.build_user_rule_card_text(_base_snapshot(id=59, mode="video", target_title="Family Club"))
-    assert "⚙️ Правило #" in text
+    assert "⚙️ <b>Правило #" in text
     assert "👉" in text
     assert "Работает · Видеоредактор" in text
-    assert "Ждёт до" in text
-    assert "В очереди" in text
-    assert "В обработке" in text
+    assert "Ближайшая отправка" in text
+    assert "Очередь" in text
+    assert "Обработка" in text
     assert "Отправлено" in text
     assert "Ошибки" in text
     assert "Позиция" in text

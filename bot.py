@@ -69,10 +69,8 @@ from app.keyboards import (
 from app.logging_setup import setup_logging
 from app.parser import parse_channel_history, parse_group_history
 from app.sender import SenderService
-from app.delivery_diagnostics_admin import format_delivery_diagnostics_admin_text
+from app.rule_card_schedule import rule_schedule_label, rule_fixed_times_label, rule_next_send_label
 from app.delivery_error_text import describe_delivery_error
-from app.delivery_observability import DeliveryObservabilityService
-from app.delivery_observability_provider import RepositoryDeliveryObservabilityProvider
 telethon_client = None
 video_emoji_validator = VideoEmojiValidator()
 video_caption_save_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
@@ -237,9 +235,13 @@ MENU_NAVIGATION_TEXTS = {
     "➖ Удалить источник",
     "➖ Удалить получатель",
     "➕ Добавить правило",
+    "⚠️ Центр ошибок",
+    "📊 Журнал событий",
     "⚠️ Проблемные доставки",
     "📊 Диагностика доставки",
+    "🧯 Зависшие задачи",
     "📊 Журнал системы",
+    "🎨 Тест styled-кнопок",
     "▶️ Запуск",
     "▶️ Запустить пересылку",
     "⏸ Стоп",
@@ -3275,8 +3277,10 @@ def build_rule_card_text(row) -> str:
     if target_thread:
         target_title = f"{target_title} (тема {target_thread})"
 
-    status_line = build_rule_status_line(row)
-    wait_line = build_rule_wait_line(row)
+    schedule_row = dict(row)
+    status_line = f"{build_rule_status_line(row)} · {rule_schedule_label(schedule_row)}"
+    wait_line = rule_next_send_label(schedule_row, USER_TZ)
+    fixed_times = rule_fixed_times_label(schedule_row)
 
     processing = int(row["processing"] or 0)
     faulty = int(row["faulty"] or 0)
@@ -3324,11 +3328,7 @@ def build_rule_card_text(row) -> str:
     mode = (row["mode"] or "repost") if "mode" in row.keys() else "repost"
     caption_mode_line = ""
 
-    if mode == "repost":
-        caption_mode_value = get_rule_caption_mode_value(rule_id, row=row)
-        caption_mode_text = caption_delivery_mode_to_text(caption_mode_value)
-        caption_mode_line = f"✍️ <b>Режим подписи:</b> {safe_html(caption_mode_text)}"
-    elif mode == "video":
+    if mode == "video":
         clip_seconds = int((row["video_clip_duration_seconds"] if "video_clip_duration_seconds" in row.keys() else None) or 118)
         caption_mode_line = f"🎞 <b>Длина видео:</b> {safe_html(format_duration_ru(clip_seconds))}"
 
@@ -3362,16 +3362,19 @@ def build_rule_card_text(row) -> str:
         f"📥 <b>Получатель:</b> {safe_html(target_title)}",
         "",
         safe_html(status_line),
-        safe_html(wait_line),
+        f"🕒 Ближайшая отправка: <b>{safe_html(wait_line)}</b>",
+        *([f"⏰ График отправки: <b>{safe_html(fixed_times)}</b>"] if fixed_times is not None else []),
         "",
-        "📊 <b>ПУБЛИКАЦИИ</b>",
-        f"📦 Очередь: <b>{logical_pending}</b> · ⏳ Обработка: <b>{processing}</b>",
-        f"✅ Отправлено: <b>{completed}</b> · ⚠️ Ошибки: <b>{faulty}</b>",
-        f"📍 Позиция: <b>{safe_html(position_text)}</b>"
-        + (f" · {caption_mode_line}" if caption_mode_line else ""),
+        f"📦 Очередь: <b>{logical_pending}</b>",
+        f"⏳ Обработка: <b>{processing}</b>",
+        f"✅ Отправлено: <b>{completed}</b>",
+        f"⚠️ Ошибки: <b>{faulty}</b>",
+        f"📍 Позиция: <b>{safe_html(position_text)}</b>",
     ]
+    if caption_mode_line:
+        details.append(caption_mode_line)
     if repost_campaign_line:
-        details.append(repost_campaign_line.strip().replace("\n", " · "))
+        details.extend(["", repost_campaign_line.strip()])
     return "\n".join(details)
 
 
@@ -5278,7 +5281,8 @@ def build_audit_event_block_html(row, include_rule: bool = False) -> str:
         "faulty": "ошибка", "failed": "ошибка", "done": "завершено",
         "verified": "подтверждено", "accepted": "принято", "retry": "повтор",
         "cancelled": "отменено", "skipped": "пропущено", "success": "успешно",
-        "ok": "успешно",
+        "ok": "успешно", "cleared": "очищено", "completed": "завершено",
+        "started": "запущено", "postponed": "отложено",
     }.get(raw_status, "состояние не распознано" if raw_status else ""))
 
     rule_part = ""
@@ -5337,26 +5341,15 @@ def paginate_html_blocks(
 
     return pages
 
-async def build_delivery_diagnostics_admin_text() -> str:
-    provider = RepositoryDeliveryObservabilityProvider(db)
-    service = DeliveryObservabilityService(metrics_provider=provider)
-    snapshot = await service.collect_snapshot(generated_at=datetime.now(timezone.utc))
-    return format_delivery_diagnostics_admin_text(snapshot)
-
-def build_system_journal_pages(limit: int = 300) -> list[str]:
-    rows = db.get_recent_audit(limit=limit)
+def build_system_journal_pages(limit: int = 300, *, category: str = "all") -> list[dict[str, Any]]:
+    rows = db.get_recent_audit(limit=limit, category=category)
     if not rows:
-        return ["<b>📊 Журнал системы</b>\n\nПока пуст."]
-
-    rows = list(reversed(rows))
-    blocks = [build_audit_event_block_html(row, include_rule=True) for row in rows]
-
-    pages = paginate_html_blocks(
-        header_html="<b>📊 ЖУРНАЛ СИСТЕМЫ</b>",
-        blocks=blocks,
-    )
-
-    return list(reversed(pages))
+        return [{"text": "<b>📊 ЖУРНАЛ СОБЫТИЙ</b>\n\nСобытий не найдено.", "rule_id": None}]
+    return [
+        {"text": "<b>📊 ЖУРНАЛ СОБЫТИЙ</b>\n\n" + build_audit_event_block_html(row, include_rule=True),
+         "rule_id": row["rule_id"]}
+        for row in rows
+    ]
 
 
 def build_rule_log_pages(rule_id: int, limit: int = 200) -> list[str]:
@@ -5391,33 +5384,31 @@ def parse_callback_parts(data: str, expected_prefix: str, expected_len: int) -> 
 
     return parts
 
-def build_system_journal_inline_keyboard(page: int, total_pages: int) -> InlineKeyboardMarkup:
-    nav_row: list[InlineKeyboardButton] = []
-
+def build_system_journal_inline_keyboard(
+    page: int, total_pages: int, *, category: str = "all", rule_id: int | None = None,
+) -> InlineKeyboardMarkup:
+    filters = (("Все", "all"), ("Ошибки", "errors"),
+               ("Публикации", "publications"), ("Действия", "admin"))
+    rows = [[InlineKeyboardButton(text=("✓ " if category == key else "") + title,
+                                 callback_data=f"syslog_filter:{key}")
+             for title, key in filters[:2]],
+            [InlineKeyboardButton(text=("✓ " if category == key else "") + title,
+                                 callback_data=f"syslog_filter:{key}")
+             for title, key in filters[2:]]]
+    if rule_id is not None:
+        rows.append([InlineKeyboardButton(text="📂 Открыть правило", callback_data=f"rule_card:{rule_id}")])
     if total_pages > 1:
-        if page > 0:
-            nav_row.append(
-                InlineKeyboardButton(text="⬅️", callback_data=f"syslog_page:{page-1}")
-            )
-
-        nav_row.append(
-            InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="syslog_page_info")
-        )
-
+        nav = []
+        if page:
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"syslog_page:{category}:{page-1}"))
+        nav.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="syslog_page_info"))
         if page < total_pages - 1:
-            nav_row.append(
-                InlineKeyboardButton(text="➡️", callback_data=f"syslog_page:{page+1}")
-            )
-
-    rows = []
-    if nav_row:
-        rows.append(nav_row)
-
-
-    rows.append([InlineKeyboardButton(text="🔵 Обновить", style="primary", callback_data=f"syslog_refresh:{page}")])
-
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="syslog_back")])
-
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=f"syslog_page:{category}:{page+1}"))
+        rows.append(nav)
+    rows.extend([
+        [InlineKeyboardButton(text="🔄 Обновить", style="primary", callback_data=f"syslog_refresh:{category}:{page}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="syslog_back")],
+    ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -8422,131 +8413,6 @@ async def handle_startpos_cancel(callback: CallbackQuery):
     await refresh_rule_card_for_actor(callback, rule_id)
     await answer_callback_safe_once(callback, "Отменено")
 
-@dp.callback_query(lambda c: c.data.startswith("faulty_page:"))
-async def handle_faulty_page(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
-    try:
-        _, page_raw = parse_callback_parts(callback.data, "faulty_page", 2)
-        page = int(page_raw)
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-
-    await answer_callback_safe_once(callback)
-
-    pages = await run_db(build_faulty_pages, 200)
-    total_pages = len(pages)
-    page = clamp_page(page, total_pages)
-
-    current = pages[page]
-
-    await edit_message_text_safe(
-        message=callback.message,
-        text=current["text"],
-        parse_mode="HTML",
-        reply_markup=build_faulty_inline_keyboard(page, total_pages, current["delivery_id"], rule_id=current["rule_id"]),
-    )
-
-@dp.callback_query(lambda c: c.data.startswith("faulty_refresh:"))
-async def handle_faulty_refresh(callback: CallbackQuery):
-    logger.warning("DEBUG: faulty_refresh called data=%r", callback.data)
-
-    if not await is_admin_callback(callback):
-        return
-
-    try:
-        _, page_raw = parse_callback_parts(callback.data, "faulty_refresh", 2)
-        page = int(page_raw)
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-
-    await answer_callback_safe_once(callback)
-
-    pages = await run_db(build_faulty_pages, 200)
-    total_pages = len(pages)
-    page = clamp_page(page, total_pages)
-
-    current = pages[page]
-
-    await edit_message_text_safe(
-        message=callback.message,
-        text=current["text"],
-        parse_mode="HTML",
-        reply_markup=build_faulty_inline_keyboard(
-            page,
-            total_pages,
-            current["delivery_id"],
-            rule_id=current["rule_id"],
-        ),
-    )
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("faulty_ack:"))
-async def handle_faulty_ack(callback: CallbackQuery):
-    # Old Telegram messages may still contain the retired button.
-    if not await is_admin_callback(callback):
-        return
-    await answer_callback_safe(callback, "Кнопка устарела. Нажмите «Обновить».", show_alert=True)
-
-@dp.callback_query(lambda c: c.data.startswith("faulty_clear:"))
-async def handle_faulty_clear(callback: CallbackQuery):
-    if not await is_admin_callback(callback):
-        return
-
-    try:
-        _, delivery_id_raw, page_raw = parse_callback_parts(callback.data, "faulty_clear", 3)
-        delivery_id = int(delivery_id_raw)
-        page = int(page_raw)
-    except Exception:
-        await answer_callback_safe(callback, "Ошибка данных", show_alert=True)
-        return
-
-    ok = await run_db(
-        db.clear_faulty_delivery_log,
-        delivery_id=delivery_id,
-        admin_id=callback.from_user.id if callback.from_user else settings.admin_id,
-    )
-
-    if not ok:
-        await answer_callback_safe(callback, "Нечего очищать", show_alert=True)
-        return
-
-    await answer_callback_safe_once(callback, "🧹 Лог очищен")
-
-    pages = await run_db(build_faulty_pages, 200)
-    total_pages = len(pages)
-    page = clamp_page(page, total_pages)
-    current = pages[page]
-
-    await edit_message_text_safe(
-        message=callback.message,
-        text=current["text"],
-        parse_mode="HTML",
-        reply_markup=build_faulty_inline_keyboard(page, total_pages, current["delivery_id"], rule_id=current["rule_id"]),
-    )
-
-@dp.callback_query(lambda c: c.data == "faulty_back")
-async def handle_faulty_back(callback: CallbackQuery):
-    logger.warning("DEBUG: faulty_back called data=%r", callback.data)
-
-    if not await is_admin_callback(callback):
-        return
-
-    await answer_callback_safe_once(callback)
-
-    await edit_message_text_safe(
-        message=callback.message,
-        text="⚠️ Раздел: Диагностика",
-    )
-
-    await send_message_safe(
-        chat_id=callback.message.chat.id,
-        text="⚠️ Раздел: Диагностика",
-        reply_markup=get_diagnostics_menu(),
-    )
-
 @dp.message(lambda m: m.chat.type != "private")
 async def handle_new_message(message: Message):
     try:
@@ -9044,7 +8910,6 @@ def _register_admin_handlers() -> None:
         build_faulty_inline_keyboard=build_faulty_inline_keyboard,
         build_system_journal_pages=build_system_journal_pages,
         build_system_journal_inline_keyboard=build_system_journal_inline_keyboard,
-        build_delivery_diagnostics_admin_text=build_delivery_diagnostics_admin_text,
         edit_message_text_safe=lambda *a, **k: edit_message_text_safe(*a, **k),
         get_channels_menu=get_channels_menu,
         get_queue_menu=get_queue_menu,

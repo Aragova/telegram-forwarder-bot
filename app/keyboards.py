@@ -38,11 +38,8 @@ def get_main_menu() -> ReplyKeyboardMarkup:
 def get_diagnostics_menu() -> ReplyKeyboardMarkup:
     return _kb(
         [
-            ["⚠️ Проблемные доставки"],
-            ["📊 Диагностика доставки"],
-            ["🧯 Зависшие задачи"],
-            ["📊 Журнал системы"],
-            ["🎨 Тест styled-кнопок"],
+            ["⚠️ Центр ошибок"],
+            ["📊 Журнал событий"],
             ["⬅️ Назад в меню"],
         ],
         placeholder="Раздел: Диагностика",

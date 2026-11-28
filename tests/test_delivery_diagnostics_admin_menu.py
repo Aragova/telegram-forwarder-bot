@@ -8,35 +8,18 @@ from app.postgres_repository import PostgresRepository
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_delivery_diagnostics_button_is_in_main_diagnostics_menu_next_to_existing_items() -> None:
-    source = (ROOT / "app/keyboards.py").read_text(encoding="utf-8")
-    start = source.index("def get_diagnostics_menu")
-    end = source.index("def get_system_menu", start)
-    menu_source = source[start:end]
-
-    assert "📊 Диагностика доставки" in menu_source
-    assert "⚠️ Проблемные доставки" in menu_source
-    assert "📊 Журнал системы" in menu_source
-    assert "🧯 Зависшие задачи" in menu_source
-    assert menu_source.index("⚠️ Проблемные доставки") < menu_source.index("📊 Диагностика доставки") < menu_source.index("🧯 Зависшие задачи") < menu_source.index("📊 Журнал системы")
-
-    bot_source = (ROOT / "bot.py").read_text(encoding="utf-8")
-    rule_card_start = bot_source.find("def build_rule_card")
-    if rule_card_start != -1:
-        next_section = bot_source.find("\ndef ", rule_card_start + 1)
-        rule_card_source = bot_source[rule_card_start:next_section if next_section != -1 else len(bot_source)]
-        assert "📊 Диагностика доставки" not in rule_card_source
+def test_diagnostics_menu_contains_only_operational_sections():
+    from app.keyboards import get_diagnostics_menu
+    assert [[button.text for button in row] for row in get_diagnostics_menu().keyboard] == [
+        ["⚠️ Центр ошибок"], ["📊 Журнал событий"], ["⬅️ Назад в меню"],
+    ]
 
 
 def test_delivery_diagnostics_handler_is_admin_only() -> None:
     source = (ROOT / "app/admin_handlers/diagnostics.py").read_text(encoding="utf-8")
-    start = source.index("async def handle_delivery_diagnostics")
-    end = source.index("@dp.message(lambda m: m.text == \"📊 Журнал системы\")", start)
-    handler_source = source[start:end]
-
-    assert "📊 Диагностика доставки" in source
+    handler_source = source[source.index("async def handle_delivery_diagnostics"):source.index("async def center_payload")]
     assert "ctx.is_admin(message)" in handler_source
-    assert "build_delivery_diagnostics_admin_text" in handler_source
+    assert "center_payload" in handler_source
     assert 'parse_mode="HTML"' in handler_source
 
 
@@ -59,7 +42,7 @@ def test_forbidden_runtime_files_do_not_contain_delivery_diagnostics_button() ->
 def test_stuck_delivery_handlers_are_admin_only_and_confirmation_required() -> None:
     source = (ROOT / "app/admin_handlers/diagnostics.py").read_text(encoding="utf-8")
     start = source.index("async def handle_stuck_deliveries")
-    end = source.index('@dp.message(lambda m: m.text == "📊 Журнал системы")', start)
+    end = source.index("async def journal_payload", start)
     handler_source = source[start:end]
     assert "ctx.is_admin(message)" in handler_source
     assert "ctx.is_admin_callback(callback)" in handler_source
@@ -106,16 +89,17 @@ def test_faulty_keyboard_opens_correct_rule_and_preserves_clear() -> None:
 def test_legacy_ack_is_read_only_and_requires_admin() -> None:
     import ast
 
-    for path in ("bot.py", "app/admin_handlers/diagnostics.py"):
-        source = (ROOT / path).read_text(encoding="utf-8")
-        handlers = [n for n in ast.walk(ast.parse(source))
-                    if isinstance(n, ast.AsyncFunctionDef) and n.name == "handle_faulty_ack"]
-        assert len(handlers) == 1
-        body = ast.get_source_segment(source, handlers[0])
-        assert "is_admin_callback" in body
-        assert "Обновить" in body
-        assert "resolve_problem" not in body
-        assert "run_db" not in body
+    source = (ROOT / "app/admin_handlers/diagnostics.py").read_text(encoding="utf-8")
+    handlers = [n for n in ast.walk(ast.parse(source))
+                if isinstance(n, ast.AsyncFunctionDef) and n.name == "handle_faulty_ack"]
+    assert len(handlers) == 1
+    body = ast.get_source_segment(source, handlers[0])
+    assert "is_admin_callback" in body
+    assert "Обновить" in body
+    assert "resolve_problem" not in body
+    assert "run_db" not in body
+    bot_source = (ROOT / "bot.py").read_text(encoding="utf-8")
+    assert "async def handle_faulty_ack" not in bot_source
 
 
 
@@ -162,8 +146,8 @@ def test_orphan_confirmation_is_one_use_and_bound_to_operator():
     assert store.consume(cb) is None
     rows = [{"rule_id": i, "is_active": False} for i in range(1, 11)]
     keyboard = _orphan_page_keyboard(rows, 0)
-    assert keyboard.inline_keyboard[-1][-1].callback_data == "stuck_orphan_page:10"
-    assert _orphan_page_keyboard([], 10).inline_keyboard[-1][0].callback_data == "stuck_orphan_page:0"
+    assert keyboard.inline_keyboard[-2][-1].callback_data == "stuck_orphan_page:10"
+    assert _orphan_page_keyboard([], 10).inline_keyboard[-2][0].callback_data == "stuck_orphan_page:0"
 
 
 def test_orphan_confirmation_rejects_missing_identity_without_consuming_token():
@@ -192,3 +176,24 @@ def test_quarantine_traceback_identifies_operation_without_exception_payload():
     assert "failing_db_operation" in trace
     assert "test_delivery_diagnostics_admin_menu.py:" in trace
     assert "private-database-value" not in trace
+
+
+def test_center_uses_exact_counts_and_fail_closed_unknown():
+    from app.admin_handlers.diagnostics import _center_payload, _review_payload, _parse_journal_callback
+    counts = dict(faulty=250, stale_jobs=3, orphan_rules=2, receipts=1, cooldowns=4)
+    text, kb = _center_payload(counts)
+    assert "Проблемные доставки: <b>250</b>" in text
+    assert "Зависшие задания: <b>3</b>" in text
+    callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert callbacks == ["faulty_page:0", "diag_stale", "stuck_orphan_page:0",
+                         "diag_review:receipts:0", "diag_review:cooldowns:0", "diag_center"]
+    unknown, _ = _center_payload(None)
+    assert "Данные недоступны" in unknown and "Проблем не найдено" not in unknown
+    assert _parse_journal_callback("syslog_page:4") == ("all", 4)
+    assert _parse_journal_callback("syslog_filter:errors") == ("errors", 0)
+    assert _parse_journal_callback("syslog_refresh:admin:3") == ("admin", 3)
+    detail, kb = _review_payload("receipts", [dict(rule_id=169, source_message_ids=[1, 2], expired=True)], 0)
+    assert "Срок истёк" in detail
+    assert kb.inline_keyboard[0][0].callback_data == "rule_card:169"
+    detail, _ = _review_payload("cooldowns", [dict(scope_key="SECRET_TOKEN", seconds=120)], 0)
+    assert "SECRET_TOKEN" not in detail

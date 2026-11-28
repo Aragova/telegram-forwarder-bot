@@ -436,10 +436,12 @@ def test_rich_rule_card_preserves_snapshot_counters_and_routes():
         "video_clip_duration_seconds": 118,
     }
     text = bot.build_rule_card_text(row)
-    for heading in ("<b>ПРАВИЛО #214</b>", "<b>ПУБЛИКАЦИИ</b>"):
-        assert heading in text
+    assert "<b>ПРАВИЛО #214</b>" in text
+    assert "ПУБЛИКАЦИИ" not in text
     assert "━━━━━━━━━━━━━━" not in text
-    assert len(text.splitlines()) <= 13
+    assert " · ⏳ Обработка" not in text
+    assert " · ⚠️ Ошибки" not in text
+    assert "Ближайшая отправка:" in text
     assert "Новости &lt;VIP&gt;" in text
     assert "ПРИВАТЫ &amp; Stars" in text
     assert "Очередь: <b>5</b>" in text
