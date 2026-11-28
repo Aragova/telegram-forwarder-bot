@@ -225,7 +225,7 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback)
-        edited = await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+        edited = await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb, parse_mode="HTML")
         if edited is False:
             await ctx.answer_callback_safe(callback, "Не удалось открыть карточку. Повторите попытку.", show_alert=True)
 
@@ -239,7 +239,7 @@ def register_user_rule_handlers(dp: Dispatcher, ctx: UserHandlersContext) -> Non
             await ctx.answer_callback_safe(callback, "Правило не найдено", show_alert=True)
             return
         await ctx.answer_callback_safe_once(callback)
-        edited = await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb)
+        edited = await ctx.edit_message_text_safe(message=callback.message, text=text, reply_markup=kb, parse_mode="HTML")
         if edited is False:
             await ctx.answer_callback_safe(callback, "Не удалось открыть карточку. Повторите попытку.", show_alert=True)
 

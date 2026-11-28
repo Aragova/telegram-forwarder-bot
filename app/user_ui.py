@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from html import escape
+from app.rule_card_schedule import rule_schedule_label, rule_fixed_times_label, rule_next_send_label
 from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -462,7 +464,7 @@ def build_user_timezone_text(current_tz: str = "Europe/Moscow", utc_label: str =
         "🌍 TimeZone\n\n"
         f"Текущий часовой пояс:\n{current_tz} · {utc_label}\n\n"
         "Он используется для:\n"
-        "• строки “Ждёт до”;\n"
+        "• строки “Ближайшая отправка”;\n"
         "• фиксированного времени публикаций;\n"
         "• живого статуса;\n"
         "• логов и истории."
@@ -862,45 +864,33 @@ def _format_user_rule_position(current_position: Any, total: int) -> str:
 
 def build_user_rule_card_text(snapshot: dict[str, Any]) -> str:
     rule_id = int(snapshot.get("id") or 0)
-    mode_raw = str(snapshot.get("mode") or "repost").strip().lower()
-    mode = user_rule_mode_label(mode_raw)
+    mode = user_rule_mode_label(snapshot.get("mode"))
     target = str(snapshot.get("target_title") or snapshot.get("target_id") or "—")
-    status = user_rule_status_label(
-        bool(snapshot.get("is_active")),
-        int(snapshot.get("logical_processing") or snapshot.get("processing") or 0),
-        int(snapshot.get("logical_faulty") or snapshot.get("faulty") or 0),
-    )
-    wait_to = _format_user_rule_wait(snapshot.get("next_run_at"))
-    top_time_pause_to = _format_user_rule_wait(snapshot.get("top_time_pause_ends_at") or (snapshot.get("active_top_time_pause") or {}).get("ends_at"))
-    pending_count = int(snapshot.get("logical_pending") or 0)
-    processing_count = int(snapshot.get("logical_processing") or snapshot.get("processing") or 0)
-    sent_count = int(snapshot.get("logical_completed") or 0)
-    faulty_count = int(snapshot.get("logical_faulty") or snapshot.get("faulty") or 0)
+    if snapshot.get("target_thread_id"):
+        target += f" (тема {snapshot['target_thread_id']})"
+    processing = int(snapshot.get("logical_processing", snapshot.get("processing")) or 0)
+    faulty = int(snapshot.get("logical_faulty", snapshot.get("faulty")) or 0)
+    status = user_rule_status_label(bool(snapshot.get("is_active")), processing, faulty)
+    fixed_times = rule_fixed_times_label(snapshot)
+    wait_to = rule_next_send_label(snapshot, USER_TZ)
+    pause = _format_user_rule_wait(snapshot.get("top_time_pause_ends_at") or (snapshot.get("active_top_time_pause") or {}).get("ends_at"))
     total = int(snapshot.get("logical_total") or 0)
     position = _format_user_rule_position(snapshot.get("logical_current_position"), total)
-
     lines = [
-        f"⚙️ Правило #{rule_id}",
-        f"👉 {target}",
+        f"⚙️ <b>Правило #{rule_id}</b>",
+        f"👉 {escape(target)}",
         "",
-        f"{status} · {mode}",
+        escape(f"{status} · {mode} · {rule_schedule_label(snapshot)}"),
+        f"🕒 Ближайшая отправка: <b>{escape(wait_to)}</b>",
+        *([f"⏰ График отправки: <b>{escape(fixed_times)}</b>"] if fixed_times is not None else []),
+        *([f"📌 Пауза до {escape(pause)} — рекламный пост в топе"] if pause != "—" else []),
         "",
-        "──────────────",
-        "",
-        f"🕒 Ждёт до {wait_to}",
-        *([f"📌 Пауза до {top_time_pause_to} — рекламный пост в топе"] if top_time_pause_to != "—" else []),
-        "",
-        f"📦 В очереди: {pending_count}",
-        f"⏳ В обработке: {processing_count}",
-        f"✅ Отправлено: {sent_count}",
-        f"⚠️ Ошибки: {faulty_count}",
-        f"📍 Позиция: {position}",
+        f"📦 Очередь: <b>{int(snapshot.get('logical_pending') or 0)}</b>",
+        f"⏳ Обработка: <b>{processing}</b>",
+        f"✅ Отправлено: <b>{int(snapshot.get('logical_completed') or 0)}</b>",
+        f"⚠️ Ошибки: <b>{faulty}</b>",
+        f"📍 Позиция: <b>{escape(position)}</b>",
     ]
-    if mode_raw == "repost":
-        has_caption = bool(str(snapshot.get("repost_caption") or "").strip())
-        caption_enabled = has_caption and bool(snapshot.get("repost_caption_enabled"))
-        caption_state = "🟢 Моя" if caption_enabled else ("⚪ OFF · оригинал" if has_caption else "Оригинал")
-        lines.extend(["", "──────────────", "", f"✍️ Подпись: {caption_state}"])
     return "\n".join(lines)
 
 

@@ -40,27 +40,27 @@ def _base_snapshot(**overrides):
 
 def test_repost_card_text_contains_required_blocks():
     text = user_ui.build_user_rule_card_text(_base_snapshot())
-    assert "⚙️ Правило #" in text
+    assert "⚙️ <b>Правило #" in text
     assert "👉" in text
     assert "Работает · Репост" in text
-    assert "Ждёт до" in text
-    assert "В очереди" in text
-    assert "В обработке" in text
+    assert "Ближайшая отправка" in text
+    assert "Очередь" in text
+    assert "Обработка" in text
     assert "Отправлено" in text
     assert "Ошибки" in text
     assert "Позиция" in text
-    assert "Подпись" in text
-    assert "──────────────" in text
+    assert "Подпись" not in text
+    assert "──────────────" not in text
 
 
 def test_video_card_text_contains_required_blocks():
     text = user_ui.build_user_rule_card_text(_base_snapshot(id=59, mode="video", target_title="Family Club"))
-    assert "⚙️ Правило #" in text
+    assert "⚙️ <b>Правило #" in text
     assert "👉" in text
     assert "Работает · Видеоредактор" in text
-    assert "Ждёт до" in text
-    assert "В очереди" in text
-    assert "В обработке" in text
+    assert "Ближайшая отправка" in text
+    assert "Очередь" in text
+    assert "Обработка" in text
     assert "Отправлено" in text
     assert "Ошибки" in text
     assert "Позиция" in text
@@ -291,3 +291,16 @@ def test_user_rule_card_shows_active_top_time_pause():
 
     assert "📌 Пауза до" in text
     assert "— рекламный пост в топе" in text
+
+
+def test_user_rule_card_open_and_refresh_render_html():
+    import ast
+    from pathlib import Path
+    tree = ast.parse((Path(__file__).resolve().parents[1] / "app/user_handlers/rules.py").read_text())
+    for name in ("handle_user_rule_open", "handle_user_rule_refresh"):
+        handler = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == name)
+        calls = [node for node in ast.walk(handler) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute) and node.func.attr == "edit_message_text_safe"]
+        assert len(calls) == 1
+        assert any(kw.arg == "parse_mode" and isinstance(kw.value, ast.Constant)
+                   and kw.value.value == "HTML" for kw in calls[0].keywords)

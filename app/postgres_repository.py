@@ -1913,30 +1913,105 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         logger.warning("MANUAL_STALE_JOB_RECOVERY | admin_id=%s | job_ids=%s", admin_id, ids)
         return {"updated_count": len(ids), "job_ids": ids, "limit": safe_limit}
 
+    @staticmethod
+    def _orphaned_processing_rule_predicate() -> str:
+        return """
+            r.rescan_owner_token IS NULL
+            AND EXISTS (SELECT 1 FROM deliveries d WHERE d.rule_id=r.id AND d.status='processing')
+            AND NOT EXISTS (
+                SELECT 1 FROM jobs j WHERE j.payload_json->>'rule_id'=r.id::text
+                  AND j.job_type=ANY(%s)
+                  AND j.status IN ('pending','leased','processing','retry')
+            )
+        """
+
+    @staticmethod
+    def _unresolved_publication_predicate() -> str:
+        return """
+            pr.published_ids IS NULL AND pr.manual_review IS NULL
+            AND a.status='accepted' AND a.rule_id=pr.rule_id
+            AND a.idempotency_key NOT LIKE 'archived:%%'
+            AND a.idempotency_key NOT LIKE '%%:rescan:%%'
+        """
+
+    @staticmethod
+    def _active_timed_cooldown_predicate() -> str:
+        # Non-expiring video-emoji write fences are not timed restrictions.
+        return "blocked_until > NOW() AND isfinite(blocked_until)"
+
+    def get_diagnostics_center_snapshot(self, *, older_than_seconds: int) -> dict[str, int]:
+        """Exact, read-only counts; use the recovery predicates, not job age."""
+        stale = self._stale_delivery_job_predicate()
+        membership = self._delivery_job_membership_predicate()
+        orphan = self._orphaned_processing_rule_predicate()
+        unresolved = self._unresolved_publication_predicate()
+        faulty = self._uncleared_faulty_predicate()
+        timed_cooldown = self._active_timed_cooldown_predicate()
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    SELECT
+                      (SELECT COUNT(*) FROM deliveries d JOIN posts p ON p.id=d.post_id
+                       JOIN routing r ON r.id=d.rule_id WHERE {faulty}) AS faulty,
+                      (SELECT COUNT(*) FROM jobs j WHERE {stale} AND EXISTS (
+                        SELECT 1 FROM deliveries d JOIN routing r ON r.id=d.rule_id
+                        WHERE d.status='processing' AND r.rescan_owner_token IS NULL
+                          AND {membership}
+                      )) AS stale_jobs,
+                      (SELECT COUNT(*) FROM routing r WHERE {orphan}) AS orphan_rules,
+                      (SELECT COUNT(*) FROM telegram_publication_receipts pr
+                        JOIN delivery_attempts a ON a.idempotency_key=pr.idempotency_key
+                        JOIN routing r ON r.id=pr.rule_id WHERE {unresolved}) AS receipts,
+                      (SELECT COUNT(*) FROM telegram_transport_cooldowns
+                        WHERE {timed_cooldown}) AS cooldowns
+                    """, (max(600, int(older_than_seconds)), sorted(DELIVERY_JOB_TYPES)))
+                return {key: int(value) for key, value in cur.fetchone().items()}
+
+    def get_diagnostics_review_rows(self, category: str, *, limit: int = 10, offset: int = 0) -> list[dict[str, Any]]:
+        """Read-only review; no manual replay or cooldown clearing."""
+        limit = max(1, min(int(limit), 10))
+        offset = max(0, int(offset))
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                if category == "receipts":
+                    unresolved = self._unresolved_publication_predicate()
+                    cur.execute(f"""
+                        SELECT pr.rule_id, pr.source_message_ids, pr.scheduled_ids,
+                               pr.target_peer_id, pr.deadline_at,
+                               (pr.expired_at IS NOT NULL OR pr.deadline_at<=NOW()) AS expired
+                        FROM telegram_publication_receipts pr
+                        JOIN delivery_attempts a ON a.idempotency_key=pr.idempotency_key
+                        JOIN routing r ON r.id=pr.rule_id
+                        WHERE {unresolved}
+                        ORDER BY pr.deadline_at, pr.idempotency_key LIMIT %s OFFSET %s
+                    """, (limit, offset))
+                elif category == "cooldowns":
+                    timed_cooldown = self._active_timed_cooldown_predicate()
+                    cur.execute(f"""
+                        SELECT scope_key, blocked_until,
+                            CASE WHEN isfinite(blocked_until)
+                                 THEN CEIL(EXTRACT(EPOCH FROM (blocked_until-NOW())))::bigint
+                            END AS seconds
+                        FROM telegram_transport_cooldowns WHERE {timed_cooldown}
+                        ORDER BY blocked_until, scope_key LIMIT %s OFFSET %s
+                    """, (limit, offset))
+                else:
+                    raise ValueError("Unknown diagnostic category")
+                return [dict(row) for row in cur.fetchall()]
+
     def get_orphaned_processing_rules(self, *, limit: int = 10, after_rule_id: int = 0) -> list[dict[str, Any]]:
         """Read-only diagnostic. Absence of a job is not evidence of no send."""
         with self.connect() as conn:
             with conn.cursor() as cur:
+                predicate = self._orphaned_processing_rule_predicate()
                 cur.execute(
-                    """
+                    f"""
                     SELECT r.id AS rule_id, r.is_active
                     FROM routing r
-                    WHERE r.rescan_owner_token IS NULL
-                      AND r.id > %s
-                      AND EXISTS (
-                          SELECT 1 FROM deliveries d
-                          WHERE d.rule_id=r.id AND d.status='processing'
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1 FROM jobs j
-                          WHERE j.payload_json->>'rule_id'=r.id::text
-                            AND j.job_type=ANY(%s)
-                            AND j.status IN ('pending','leased','processing','retry')
-                      )
-                    ORDER BY r.id
-                    LIMIT %s
+                    WHERE {predicate} AND r.id > %s
+                    ORDER BY r.id LIMIT %s
                     """,
-                    (max(0, int(after_rule_id)), sorted(DELIVERY_JOB_TYPES), max(1, min(int(limit), 10))),
+                    (sorted(DELIVERY_JOB_TYPES), max(0, int(after_rule_id)), max(1, min(int(limit), 10))),
                 )
                 return [dict(row) for row in cur.fetchall() or []]
 
@@ -8046,26 +8121,33 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     result["faulty"] += summary["faulty"]
         return result
 
+    @staticmethod
+    def _uncleared_faulty_predicate() -> str:
+        return """
+            d.status = 'faulty'
+            AND (d.error_text IS NULL OR (
+                d.error_text NOT LIKE 'Self-loop:%%'
+                AND d.error_text <> 'self_target_echo'
+            ))
+            AND NOT EXISTS (
+                SELECT 1 FROM audit_log cleared
+                WHERE cleared.delivery_id = d.id
+                  AND cleared.event_type = 'faulty_log_cleared'
+            )
+        """
+
     def count_uncleared_faulty_deliveries(self) -> int:
         """Count delivery IDs still visible in the admin faulty-delivery list."""
         with self.connect() as conn:
             with conn.cursor() as cur:
+                predicate = self._uncleared_faulty_predicate()
                 cur.execute(
-                    """
+                    f"""
                     SELECT COUNT(*) AS cnt
                     FROM deliveries d
                     JOIN posts p ON p.id = d.post_id
                     JOIN routing r ON r.id = d.rule_id
-                    WHERE d.status = 'faulty'
-                      AND (d.error_text IS NULL OR (
-                          d.error_text NOT LIKE 'Self-loop:%'
-                          AND d.error_text <> 'self_target_echo'
-                      ))
-                      AND NOT EXISTS (
-                          SELECT 1 FROM audit_log cleared
-                          WHERE cleared.delivery_id = d.id
-                            AND cleared.event_type = 'faulty_log_cleared'
-                      )
+                    WHERE {predicate}
                     """
                 )
                 return int(cur.fetchone()["cnt"])
@@ -8073,8 +8155,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
     def get_faulty_deliveries(self, limit: int = 20):
         with self.connect() as conn:
             with conn.cursor() as cur:
+                predicate = self._uncleared_faulty_predicate()
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         d.id,
                         d.rule_id,
@@ -8128,16 +8211,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                      AND COALESCE(t.tenant_id, 1) = COALESCE(r.tenant_id, d.tenant_id, 1)
                      AND ((t.thread_id IS NULL AND r.target_thread_id IS NULL) OR t.thread_id = r.target_thread_id)
                      AND t.channel_type = 'target'
-                    WHERE d.status = 'faulty'
-                      AND (d.error_text IS NULL OR (
-                          d.error_text NOT LIKE 'Self-loop:%%'
-                          AND d.error_text <> 'self_target_echo'
-                      ))
-                      AND NOT EXISTS (
-                          SELECT 1 FROM audit_log cleared
-                          WHERE cleared.delivery_id = d.id
-                            AND cleared.event_type = 'faulty_log_cleared'
-                      )
+                    WHERE {predicate}
                     ORDER BY d.id DESC
                     LIMIT %s
                     """,
@@ -10508,15 +10582,23 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 )
                 return cur.fetchall()
 
-    def get_recent_audit(self, limit: int = 100):
+    def get_recent_audit(self, limit: int = 100, *, category: str = "all"):
+        # Allowlisted predicates; filter before the limit, not after pagination.
+        filters = {
+            "all": "TRUE",
+            "errors": "status IN ('failed','faulty') OR (error_text IS NOT NULL AND error_text<>'' AND status IS DISTINCT FROM 'cleared' AND status IS DISTINCT FROM 'skipped')",
+            "publications": "event_type IN ('delivery_started','delivery_sent','delivery_failed','delivery_process_exception','delivery_rolled_back','delivery_pipeline_step','delivery_caption_mode_selected')",
+            "admin": "admin_id IS NOT NULL",
+        }
+        if category not in filters:
+            raise ValueError("Unknown audit filter")
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    SELECT *
-                    FROM audit_log
-                    ORDER BY id DESC
-                    LIMIT %s
+                    f"""
+                    SELECT * FROM audit_log
+                    WHERE ({filters[category]})
+                    ORDER BY id DESC LIMIT %s
                     """,
                     (limit,),
                 )

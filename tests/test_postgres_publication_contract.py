@@ -1998,3 +1998,135 @@ def test_expired_unstarted_lease_does_not_consume_attempt_and_defer_delays(repo)
             cur.execute("SELECT run_at > NOW()+INTERVAL '30 seconds' AS delayed FROM jobs WHERE id=%s", (job_id,))
             assert cur.fetchone()["delayed"]
     assert repo.get_job(job_id)["attempts"] == before
+
+
+def test_diagnostics_center_counts_jobs_not_album_members_and_preserves_evidence(repo):
+    baseline = repo.get_diagnostics_center_snapshot(older_than_seconds=900)
+    seeded = seed(repo, uuid4().int % 10**12, count=3)
+    key, rule_id, ids, _, _, _ = seeded
+    orphan = repo.get_diagnostics_center_snapshot(older_than_seconds=900)
+    assert orphan["orphan_rules"] == baseline["orphan_rules"] + 1
+
+    job_id = repo.create_job("repost_album", {
+        "rule_id": rule_id, "delivery_id": ids[0], "delivery_ids": ids,
+    }, "light")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE jobs SET status='processing', locked_by='diagnostic-test',
+                    created_at=NOW()-INTERVAL '2 days', updated_at=NOW(),
+                    lease_until=NOW()+INTERVAL '30 seconds' WHERE id=%s
+            """, (job_id,))
+    live = repo.get_diagnostics_center_snapshot(older_than_seconds=900)
+    assert live["orphan_rules"] == baseline["orphan_rules"]
+    assert live["stale_jobs"] == baseline["stale_jobs"]
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE jobs SET updated_at=NOW()-INTERVAL '16 minutes' WHERE id=%s", (job_id,))
+    stale = repo.get_diagnostics_center_snapshot(older_than_seconds=900)
+    assert stale["stale_jobs"] == baseline["stale_jobs"] + 1
+    assert {r["delivery_id"] for r in repo.get_stuck_processing_deliveries(
+        older_than_seconds=900, rule_id=rule_id,
+    )} == set(ids)
+    assert repo.get_job(job_id)["status"] == "processing"
+    assert all(repo.get_delivery(i)["status"] == "processing" for i in ids)
+
+    assert repo.fail_job(job_id, "terminal test failure")
+    assert register(repo, seeded, [711, 712, 713])
+    pending = repo.get_diagnostics_center_snapshot(older_than_seconds=900)
+    assert pending["receipts"] == baseline["receipts"] + 1
+    matching = [
+        row for offset in range(0, pending["receipts"], 10)
+        for row in repo.get_diagnostics_review_rows("receipts", offset=offset)
+        if row["rule_id"] == rule_id
+    ]
+    assert len(matching) == 1 and not matching[0]["expired"]
+
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE telegram_publication_receipts SET deadline_at=NOW()-INTERVAL '1 second' WHERE idempotency_key=%s", (key,))
+    assert repo.expire_publication_receipt(key, "publication_receipt_expired_no_resend")
+    assert repo.get_diagnostics_center_snapshot(older_than_seconds=900)["faulty"] == baseline["faulty"] + 3
+    assert repo.clear_faulty_delivery_log(ids[0], admin_id=1)
+    after = repo.get_diagnostics_center_snapshot(older_than_seconds=900)
+    assert after["faulty"] == repo.count_uncleared_faulty_deliveries() == baseline["faulty"] + 2
+    assert after["receipts"] == pending["receipts"]
+    assert repo.get_delivery(ids[0])["status"] == "faulty"
+    assert repo.get_delivery_attempt_by_idempotency_key(key)["status"] == "accepted"
+
+
+def test_diagnostics_journal_filters_before_limit_and_cooldown_is_active(repo):
+    marker = str(uuid4())
+    active = f"mtproto:{uuid4().int % 10**12}"
+    expired = f"mtproto:{uuid4().int % 10**12}"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO audit_log(created_at,event_type,status,error_text,admin_id)
+                VALUES ('2026-11-28T10:00:00+00:00','delivery_failed','failed',%s,NULL),
+                       ('2026-11-28T10:00:01+00:00','delivery_sent','sent',NULL,NULL),
+                       ('2026-11-28T10:00:02+00:00','rule_enabled','ok',NULL,1)
+            """, (marker,))
+            cur.execute("""
+                INSERT INTO telegram_transport_cooldowns(scope_key,blocked_until)
+                VALUES (%s,NOW()+INTERVAL '1 hour'),(%s,NOW()-INTERVAL '1 second')
+            """, (active, expired))
+    assert repo.get_recent_audit(limit=1, category="errors")[0]["error_text"] == marker
+    assert repo.get_recent_audit(limit=1, category="publications")[0]["event_type"] == "delivery_sent"
+    assert repo.get_recent_audit(limit=1, category="admin")[0]["event_type"] == "rule_enabled"
+    count = repo.get_diagnostics_center_snapshot(older_than_seconds=900)["cooldowns"]
+    scopes = {row["scope_key"] for offset in range(0, count, 10)
+              for row in repo.get_diagnostics_review_rows("cooldowns", offset=offset)}
+    assert active in scopes and expired not in scopes
+    with pytest.raises(ValueError):
+        repo.get_recent_audit(category="invalid")
+
+
+def test_diagnostics_timed_cooldowns_exclude_fence_keep_quotas_and_long_limits(repo):
+    account = uuid4().int % 10**12 + 1
+    user = account + 1
+    fence = f"video-emoji:{account}:inflight"
+    account_quota = f"video-emoji:{account}:quota"
+    user_quota = f"video-emoji:{account}:user:{user}:quota"
+    long_limit = f"mtproto:{account}"
+    expired = f"bot:{account}"
+    scopes = [fence, account_quota, user_quota, long_limit, expired]
+    baseline = repo.get_diagnostics_center_snapshot(older_than_seconds=900)["cooldowns"]
+    try:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO telegram_transport_cooldowns(scope_key,blocked_until)
+                    VALUES (%s,'infinity'::timestamptz), (%s,NOW()+INTERVAL '1 hour'),
+                           (%s,NOW()+INTERVAL '1 hour'), (%s,NOW()+INTERVAL '100 years'),
+                           (%s,NOW()-INTERVAL '1 second')
+                """, tuple(scopes))
+        count = repo.get_diagnostics_center_snapshot(older_than_seconds=900)["cooldowns"]
+        assert count == baseline + 3
+        visible = {row["scope_key"]: row["seconds"] for offset in range(0, count, 10)
+                   for row in repo.get_diagnostics_review_rows("cooldowns", offset=offset)}
+        assert fence not in visible and expired not in visible
+        assert account_quota in visible and user_quota in visible
+        assert visible[long_limit] > 2**31
+        assert repo.reserve_video_emoji_check(account, user, -100123) == "pending_review"
+    finally:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM telegram_transport_cooldowns WHERE scope_key=ANY(%s)", (scopes,))
+
+
+def test_diagnostics_publication_filter_includes_pipeline_and_caption_events(repo):
+    marker = str(uuid4())
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO audit_log(created_at,event_type,status,error_text)
+                VALUES (NOW(),'delivery_pipeline_step','processing',%s),
+                       (NOW(),'delivery_caption_mode_selected','processing',%s),
+                       (NOW(),'rule_enabled','ok',%s)
+            """, (marker, marker, marker))
+    rows = repo.get_recent_audit(limit=2, category="publications")
+    assert [row["event_type"] for row in rows] == [
+        "delivery_caption_mode_selected", "delivery_pipeline_step",
+    ]
+    assert all(row["error_text"] == marker for row in rows)
