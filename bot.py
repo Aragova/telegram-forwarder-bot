@@ -720,11 +720,7 @@ async def _run_rescan_rule_job(
             await _finish_rule_rescan_with_retry(
                 rule_id, was_active=was_active, owner_token=owner_token, queue_rebuilt=True,
             )
-            await _write_rescan_audit(rule_id, admin_id, {
-                "event_type": "rule_rescan_recovered", "old_value": None,
-                "new_value": {"mode": operation["mode"], "phase": "rebuilt"},
-                "extra": {"attempt": operation["attempt"]},
-            })
+            # Recovery audit is committed atomically with owner release.
             invalidate_preview_cache(rule_id)
             invalidate_rule_card_cache(rule_id)
             return
@@ -737,11 +733,7 @@ async def _run_rescan_rule_job(
             await _finish_rule_rescan_with_retry(
                 rule_id, was_active=False, owner_token=owner_token, queue_rebuilt=False,
             )
-            await _write_rescan_audit(rule_id, admin_id, {
-                "event_type": "rule_rescan_recovery_failed", "old_value": None,
-                "new_value": {"mode": operation["mode"], "is_active": False},
-                "extra": {"attempt": operation["attempt"], "reason": "retry_exhausted"},
-            })
+            # Exhausted recovery is audited by the release transaction.
             invalidate_preview_cache(rule_id)
             invalidate_rule_card_cache(rule_id)
             logger.error("RESCAN_RECOVERY_EXHAUSTED | rule_id=%s | rule_paused", rule_id)
@@ -8605,6 +8597,35 @@ def _start_repost_campaign_runtime_tasks(*, role: str) -> None:
     repost_campaign_runtime_tasks.start()
 
 
+async def _drain_with_publication_flush(drain) -> None:
+    """Persist publication evidence even while a worker is stuck in cleanup."""
+    raw_client = getattr(telethon_client, "raw", telethon_client)
+    flush = getattr(raw_client, "flush_publication_inbox", None)
+    if not callable(flush):
+        await drain()
+        return
+
+    stop = asyncio.Event()
+
+    async def persist_until_drained() -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(flush(), timeout=5)
+            except Exception:
+                logger.exception("PUBLICATION_SHUTDOWN_DRAIN_FLUSH_FAILED")
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
+
+    flusher = asyncio.create_task(persist_until_drained(), name="publication-drain-flush")
+    try:
+        await drain()
+    finally:
+        stop.set()
+        await wait_for_db_task(flusher)
+
+
 async def _shutdown_runtime(
     *,
     stop_workers_runtime: bool,
@@ -8639,7 +8660,9 @@ async def _shutdown_runtime(
 
     workers_drain_complete = True
     if stop_workers_runtime:
-        await stop_job_workers_runtime(wait_until_complete=True)
+        await _drain_with_publication_flush(
+            lambda: stop_job_workers_runtime(wait_until_complete=True),
+        )
 
     if close_dashboard_tasks:
         tasks = list(dashboard_tasks.values())
@@ -8655,7 +8678,9 @@ async def _shutdown_runtime(
 
     campaign_drain_complete = True
     if repost_campaign_runtime_tasks is not None:
-        await repost_campaign_runtime_tasks.stop(wait_until_complete=True)
+        await _drain_with_publication_flush(
+            lambda: repost_campaign_runtime_tasks.stop(wait_until_complete=True),
+        )
         repost_campaign_runtime_tasks = None
 
     resource_drain_complete = workers_drain_complete and campaign_drain_complete
