@@ -124,3 +124,46 @@ def test_alert_after_any_ack_uses_deferred_notification(early):
     notify.assert_called_once_with(chat_id=123, text="Нет доступа")
     assert not asyncio.run(once(event))
     notify.assert_called_once()
+
+
+def test_rule_card_invalidation_during_render_prevents_stale_cache():
+    import time
+
+    tree = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    names = {"build_rule_card_payload_cached", "invalidate_rule_card_cache",
+             "_get_cached_rule_card", "_get_rule_card_build_lock"}
+    nodes = [n for n in tree.body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names]
+
+    async def scenario():
+        started, release = asyncio.Event(), asyncio.Event()
+        renders = 0
+
+        async def render(rule_id):
+            nonlocal renders
+            renders += 1
+            if renders == 1:
+                started.set()
+                await release.wait()
+                return {"text": "paused", "reply_markup": "enable"}
+            return {"text": "active", "reply_markup": "disable"}
+
+        ns = {"asyncio": asyncio, "time": time, "InlineKeyboardMarkup": object,
+              "RuleCardCacheEntry": SimpleNamespace, "RULE_CARD_CACHE_TTL_SEC": 15,
+              "rule_card_cache": {}, "rule_card_build_locks": {},
+              "rule_card_render_tokens": {}, "_build_rule_card_render_async": render}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "bot.py", "exec"), ns)
+        build = ns["build_rule_card_payload_cached"]
+        first = asyncio.create_task(build(94))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        ns["invalidate_rule_card_cache"](94)
+        release.set()
+        assert await first == ("paused", "enable", "rebuilt")
+        assert not ns["rule_card_cache"]
+        assert not ns["rule_card_render_tokens"]
+        assert await build(94) == ("active", "disable", "rebuilt")
+        assert await build(94) == ("active", "disable", "cache_hit")
+        assert renders == 2
+        assert not ns["rule_card_render_tokens"]
+
+    asyncio.run(scenario())
