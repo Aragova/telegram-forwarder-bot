@@ -460,6 +460,44 @@ def prepare_publication_inbox(client: Any, repository: Any):
         except Exception:
             logger.exception("TELEGRAM_PUBLICATION_MAPPING_HANDLE_FAILED")
 
+    async def persist_volatile_evidence() -> None:
+        """Shutdown needs durability, not replay of already durable records.
+
+        Do not acquire live_lock or read/clear the fallback file here: a
+        replay may be waiting on I/O while every mapping is already safe.
+        In-flight handler writes retain their own volatile flag until settled.
+        """
+        nonlocal incident_persisted
+        if not client.publication_evidence_unpersisted:
+            return
+        if spool is None:
+            # Injected clients without a session have no durable local queue.
+            await flush_live()
+            return
+        for row in list(emergency):
+            if evidence_key(row) not in volatile_emergency:
+                continue
+            # Avoid waiting behind optional journal replay. If available,
+            # the existing fsynced append is the cheapest durability path.
+            if journal is not None and not journal_lock.locked():
+                async with journal_lock:
+                    await persist_emergency_journal(row)
+            if evidence_key(row) not in volatile_emergency or candidate is None:
+                continue
+            peer, old, new = row
+            # PostgreSQL can preserve the only in-memory copy even while
+            # local storage is unavailable. Join writes on cancellation.
+            if not await _await_journal_task(
+                asyncio.create_task(candidate.record(peer, old, new))
+            ):
+                raise RuntimeError("Publication inbox rejected mapping")
+            persist_incident = getattr(repository, "record_publication_inbox_overflow", None)
+            if not incident_persisted and callable(persist_incident):
+                await _journal_io(persist_incident, candidate.sender_account_id, peer, old)
+                incident_persisted = True
+            mark_emergency_durable(row)
+
+    client.persist_publication_evidence = persist_volatile_evidence
     client.flush_publication_inbox = flush_live
     client.add_event_handler(handle,events.Raw(types=types.UpdateDeleteScheduledMessages))
 
