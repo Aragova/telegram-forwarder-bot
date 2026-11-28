@@ -74,3 +74,10 @@ Fresh создаёт новый цикл всех исходных публик�
 неполного альбома возможен повтор уже опубликованных элементов; не включайте
 правило без проверки выбранной позиции и получателя. Запрещено вручную сбрасывать
 статусы в pending для прохождения сверки.
+
+
+The subsequent P0.12/P0.9 changes signal scheduler and rescan admission to stop
+before joining producers and draining workers/campaigns concurrently. Volatile
+publication evidence is persisted during these joins. All in-flight work is
+joined before closing clients; durable replay may resume on next startup.
+See [durable rescan and shutdown](durable-rescan-shutdown.md).

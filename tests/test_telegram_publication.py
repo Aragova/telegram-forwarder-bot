@@ -1267,3 +1267,117 @@ def test_cancelled_initial_sqlite_append_keeps_exact_mapping(monkeypatch, tmp_pa
 
     asyncio.run(scenario())
 
+
+
+def test_shutdown_persists_only_volatile_evidence_while_journal_replay_is_blocked(monkeypatch, tmp_path):
+    import threading
+    from telethon import types
+    from app import telegram_publication
+    from app.publication_mapping_spool import PublicationFallbackJournal, PublicationMappingSpool
+
+    entered, release = threading.Event(), threading.Event()
+    original_read = PublicationFallbackJournal.read_recoverable
+
+    def blocked_read(self):
+        entered.set()
+        assert release.wait(5)
+        return original_read(self)
+
+    def broken_append(self, *_args):
+        raise OSError("SQLite unavailable")
+
+    async def scenario():
+        saved, incidents = set(), []
+        client = SimpleNamespace(session=SimpleNamespace(filename=str(tmp_path / "sender.session")))
+        client.add_event_handler = lambda callback, _event: setattr(client, "handler", callback)
+
+        async def get_me():
+            return SimpleNamespace(id=7)
+
+        client.get_me = get_me
+        repo = SimpleNamespace(
+            record_telegram_publication_mappings=lambda _account, _peer, pairs: saved.update(pairs),
+            record_publication_inbox_overflow=lambda *args: incidents.append(args),
+        )
+        await telegram_publication.prepare_publication_inbox(client, repo)()
+        monkeypatch.setattr(PublicationFallbackJournal, "read_recoverable", blocked_read)
+        monkeypatch.setattr(PublicationMappingSpool, "append", broken_append)
+        replay = asyncio.create_task(client.flush_publication_inbox())
+        handler = None
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            # Already durable: no read, clear, or waiting for the replay lock.
+            await asyncio.wait_for(client.persist_publication_evidence(), 1)
+            assert not replay.done()
+
+            handler = asyncio.create_task(client.handler(types.UpdateDeleteScheduledMessages(
+                peer=types.PeerChannel(99), messages=[42], sent_messages=[142],
+            )))
+            async def wait_for_emergency():
+                while not getattr(client, "publication_write_blocked", False):
+                    await asyncio.sleep(0.01)
+            await asyncio.wait_for(wait_for_emergency(), 2)
+            # The cancelled handler has retained evidence but cannot append
+            # until the existing replay releases the journal lock.
+            handler.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await handler
+            assert client.publication_evidence_unpersisted
+            await asyncio.wait_for(client.persist_publication_evidence(), 2)
+            assert saved == {(42, 142)}
+            assert incidents and not client.publication_evidence_unpersisted
+            assert not replay.done()
+        finally:
+            release.set()
+            await asyncio.gather(replay, return_exceptions=True)
+            tasks = [task for task in asyncio.all_tasks()
+                     if task.get_name() == "telegram-publication-persist-retry"]
+            if handler is not None:
+                tasks.append(handler)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_sessionless_shutdown_persists_buffered_mapping_after_database_failure(monkeypatch):
+    from telethon import types
+    from app.telegram_publication import prepare_publication_inbox
+    from app import background_tasks
+
+    async def scenario():
+        saved = []
+        available = False
+
+        def record(account, peer, pairs):
+            if not available:
+                raise RuntimeError("temporary database outage")
+            saved.extend(pairs)
+
+        client = SimpleNamespace()
+        client.add_event_handler = lambda callback, event: setattr(client, "handler", callback)
+        async def get_me():
+            return SimpleNamespace(id=7)
+        client.get_me = get_me
+        repo = SimpleNamespace(record_telegram_publication_mappings=record)
+        await prepare_publication_inbox(client, repo)()
+
+        # Prevent the normal retry chain from masking a shutdown regression.
+        def no_retry(coro, *, name):
+            coro.close()
+            return None
+
+        monkeypatch.setattr(background_tasks, "start_background_task", no_retry)
+        await client.handler(types.UpdateDeleteScheduledMessages(
+            peer=types.PeerChannel(99), messages=[4], sent_messages=[100],
+        ))
+        assert not saved
+        assert client.publication_evidence_unpersisted
+        available = True
+        await client.persist_publication_evidence()
+        assert saved == [(4, 100)]
+        assert not client.publication_evidence_unpersisted
+
+    asyncio.run(scenario())

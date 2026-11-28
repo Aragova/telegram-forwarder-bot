@@ -45,7 +45,8 @@ from app.rule_folders_ui import root_view, rule_catalog_view, additional_functio
 from app.rule_catalog import CATALOG_PAGE_SIZE, RulePage
 from app.user_handlers.rules import build_user_rules_keyboard as build_user_rules_keyboard_view
 from app.repository import RepositoryProtocol
-from app.rescan_safety import RescanBlocked
+from app.rescan_safety import RescanBlocked, RescanSourceWriter
+from app.rescan_runtime import RescanTelegramReader, maintain_rescan_lease, rescan_db
 from app.repository_factory import create_repository
 from app.transport import wrap_bot, wrap_telethon_client
 from app.transport_policy import (
@@ -172,6 +173,7 @@ posting_active = False
 runtime_ownership = RuntimeOwnership()
 job_workers = JobWorkerLifecycle(runtime_ownership, logger)
 reaction_worker_task: asyncio.Task | None = None
+reaction_worker_stop: asyncio.Event | None = None
 scheduler_runtime_task: asyncio.Task | None = None
 job_watchdog_task: asyncio.Task | None = None
 user_states: dict[int, dict[str, Any]] = {}
@@ -180,6 +182,9 @@ dashboard_tasks: dict[int, asyncio.Task] = {}
 ui_policy: UIErrorPolicy | None = None
 last_notifications: dict[str, datetime] = {}
 rule_ui_tasks: dict[str, asyncio.Task] = {}
+rescan_recovery_task: asyncio.Task | None = None
+rescan_recovery_stop: asyncio.Event | None = None
+rescan_recovery_job: asyncio.Task | None = None
 user_handlers_ctx: UserHandlersContext | None = None
 admin_handlers_ctx: AdminHandlersContext | None = None
 repost_campaign_runtime_tasks: RepostCampaignRuntimeTasks | None = None
@@ -340,6 +345,10 @@ def _rule_ui_task_key(kind: str, rule_id: int) -> str:
 
 
 def _schedule_rule_ui_task(task_key: str, coro) -> bool:
+    if not runtime_ownership.can_poll:
+        if asyncio.iscoroutine(coro):
+            coro.close()
+        return False
     existing = rule_ui_tasks.get(task_key)
     if existing and not existing.done():
         if asyncio.iscoroutine(coro):
@@ -374,9 +383,13 @@ class RuleCardCacheEntry:
 RULE_CARD_CACHE_TTL_SEC = 15.0
 rule_card_cache: dict[int, RuleCardCacheEntry] = {}
 rule_card_build_locks: dict[int, asyncio.Lock] = {}
+# Only in-flight renders need a generation marker; do not retain deleted IDs.
+rule_card_render_tokens: dict[int, object] = {}
 
 def invalidate_rule_card_cache(rule_id: int) -> None:
-    rule_card_cache.pop(int(rule_id), None)
+    rule_id = int(rule_id)
+    rule_card_render_tokens.pop(rule_id, None)
+    rule_card_cache.pop(rule_id, None)
 
 
 def invalidate_rule_card_cache_many(rule_ids: list[int] | tuple[int, ...] | set[int]) -> None:
@@ -475,18 +488,24 @@ async def build_rule_card_payload_cached(rule_id: int) -> tuple[str | None, Inli
         if cached:
             return cached.text, cached.keyboard, "cache_hit_after_wait"
 
-        render = await _build_rule_card_render_async(rule_id)
-        if not render:
-            return None, None, "rule_not_found"
+        key = int(rule_id)
+        token = object()
+        rule_card_render_tokens[key] = token
+        try:
+            render = await _build_rule_card_render_async(rule_id)
+            if not render:
+                return None, None, "rule_not_found"
 
-        entry = RuleCardCacheEntry(
-            text=render["text"],
-            keyboard=render["reply_markup"],
-            created_at_monotonic=time.monotonic(),
-        )
-        rule_card_cache[int(rule_id)] = entry
-
-        return entry.text, entry.keyboard, "rebuilt"
+            entry = RuleCardCacheEntry(
+                text=render["text"],
+                keyboard=render["reply_markup"],
+                created_at_monotonic=time.monotonic(),
+            )
+            if rule_card_render_tokens.get(key) is token:
+                rule_card_cache[key] = entry
+            return entry.text, entry.keyboard, "rebuilt"
+        finally:
+            rule_card_render_tokens.pop(key, None)
 
 async def _show_rule_processing_screen(
     *,
@@ -539,18 +558,24 @@ class _RescanReleaseFailed(RuntimeError):
 
 
 async def _finish_rule_rescan_with_retry(rule_id: int, *, was_active: bool,
-                                         owner_token: str, queue_rebuilt: bool) -> None:
+                                         owner_token: str, queue_rebuilt: bool) -> bool:
     # The repository UPDATE checks the exact owner token on every attempt.
     for attempt in range(2):
         try:
-            await run_db(db.finish_rule_rescan, rule_id, was_active=was_active,
-                         owner_token=owner_token, queue_rebuilt=queue_rebuilt)
-            return
+            restored = await rescan_db(run_db, db.finish_rule_rescan, rule_id, was_active=was_active,
+                                       owner_token=owner_token, queue_rebuilt=queue_rebuilt)
+            return bool(restored)
         except Exception as exc:
             if attempt:
                 raise _RescanReleaseFailed("Не подтверждено снятие блокировки") from exc
             logger.warning("RESCAN_RELEASE_RETRY | rule_id=%s", rule_id, exc_info=True)
             await asyncio.sleep(1.0)
+
+
+def _rescan_wait_keyboard(rule_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⬅️ Назад к правилу", callback_data=f"rule_card:{rule_id}")
+    ]])
 
 
 async def _report_rescan_release_failure(*, rule_id: int, chat_id: int,
@@ -563,19 +588,22 @@ async def _report_rescan_release_failure(*, rule_id: int, chat_id: int,
         chat_id=chat_id, message_id=message_id,
         text=(f"⚠️ Правило #{rule_id}. {status}\n"
               "Не удалось подтвердить восстановление статуса правила. "
-              "Требуется проверка владельца пересканирования; не запускайте повторно."),
+              "Продолжение проверит автоматическое восстановление; не запускайте повторно."),
+        reply_markup=_rescan_wait_keyboard(rule_id),
     )
 
 
-async def _scan_rule_source(rule):
-    """Shared full-history scan for both rescan modes; never deletes source posts."""
+async def _scan_rule_source(rule, rule_id: int, owner_token: str):
+    """Shared full-history scan; every parser write carries the durable fence."""
+    writer = RescanSourceWriter(db, rule_id, owner_token)
+    reader = RescanTelegramReader(telethon_client)
     if rule.source_thread_id is None:
         return await parse_channel_history(
-            telethon_client, db, str(rule.source_id), clean_start=False,
+            reader, writer, str(rule.source_id), clean_start=False,
             preserve_existing_deliveries=True, collect_seen_message_ids=True,
         )
     return await parse_group_history(
-        telethon_client, db, str(rule.source_id), int(rule.source_thread_id),
+        reader, writer, str(rule.source_id), int(rule.source_thread_id),
         clean_start=False, preserve_existing_deliveries=True, collect_seen_message_ids=True,
     )
 
@@ -589,10 +617,11 @@ async def _verify_rescan_live_arrivals(rule_id: int, rule, watermark: int,
         return missing
     source = str(rule.source_id)
     entity = int(source) if source.lstrip("-").isdigit() else source
-    chat = await telethon_client.get_entity(entity)
+    reader = RescanTelegramReader(telethon_client)
+    chat = await reader.get_entity(entity)
     for start in range(0, len(candidates), 100):
         batch = candidates[start:start + 100]
-        messages = await telethon_client.get_messages(chat, ids=batch)
+        messages = await reader.get_messages(chat, ids=batch)
         if len(messages) != len(batch):
             raise RuntimeError("Неполный ответ Telegram при сверке новых записей")
         for mid, message in zip(batch, messages):
@@ -608,7 +637,7 @@ async def _verify_rescan_live_arrivals(rule_id: int, rule, watermark: int,
 
 async def _write_rescan_audit(rule_id: int, admin_id: int, audit: dict) -> None:
     try:
-        await run_db(db.log_rule_change, rule_id=rule_id, admin_id=admin_id, **audit)
+        await rescan_db(run_db, db.log_rule_change, rule_id=rule_id, admin_id=admin_id, **audit)
     except Exception:
         logger.exception("RESCAN_AUDIT_FAILED | rule_id=%s", rule_id)
 
@@ -620,7 +649,8 @@ async def _report_rescan_unknown(*, rule_id: int, chat_id: int, message_id: int)
     await _show_rule_processing_screen(
         chat_id=chat_id, message_id=message_id,
         text=(f"⚠️ Правило #{rule_id}. Результат перестройки очереди неизвестен.\n"
-              "Правило оставлено заблокированным до проверки базы. Не запускайте повторно."),
+              "Правило остановлено. Автоматическое восстановление проверит результат; не запускайте повторно."),
+        reply_markup=_rescan_wait_keyboard(rule_id),
     )
 
 
@@ -652,209 +682,253 @@ async def _complete_rescan_job(
     )
 
 
-async def _run_rescan_rule_fresh_job(
-    *,
-    rule_id: int,
-    chat_id: int,
-    message_id: int,
-    admin_id: int,
-) -> None:
-    scan_complete = False
-    commit_pending = False
-    try:
-        rule = await run_db(db.get_rule, rule_id)
-        if not rule:
-            await _show_rule_processing_screen(
-                chat_id=chat_id, message_id=message_id,
-                text=f"❌ Правило #{rule_id} не найдено",
-            )
-            return
-        was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id, fresh=True)
-        try:
-            cancel_local_rule_delivery_jobs(rule_id)
-            scan_start_max_message_id = await run_db(db.get_rule_scan_start_max_message_id, rule_id)
-            await _show_rule_processing_screen(
-                chat_id=chat_id, message_id=message_id,
-                text=f"🔄 Пересканирование правила #{rule_id}\nЧитаем историю источника.",
-                terminal=False,
-            )
-            parsed_count, seen_message_ids = await _scan_rule_source(rule)
-            missing = await _verify_rescan_live_arrivals(
-                rule_id, rule, scan_start_max_message_id, seen_message_ids,
-            )
-            commit_pending = True
-            archived, old_count, rebuilt_count = await run_db(
-                db.restart_rule_queue, rule_id, owner_token=owner_token,
-                allowed_message_ids=seen_message_ids,
-                include_newer_than_message_id=scan_start_max_message_id,
-                checked_missing_message_ids=missing,
-                expected_scope=(str(rule.source_id), rule.source_thread_id,
-                                str(rule.target_id), rule.target_thread_id, rule.mode),
-            )
-            scan_complete = True
-            commit_pending = False
-            audit = {
-                "event_type": "rule_rescanned_fresh", "old_value": None,
-                "new_value": {"next_run_at": utc_now_iso()},
-                "extra": {"mode": "fresh", "rebuilt_count": rebuilt_count,
-                          "archived_attempts": archived, "replayed_deliveries": old_count,
-                          "parsed_count": parsed_count, "seen_message_count": len(seen_message_ids)},
-            }
-            await _write_rescan_audit(rule_id, admin_id, audit)
-        except RescanBlocked:
-            # A repository safety rejection rolls back the transaction.
-            commit_pending = False
-            raise
-        finally:
-            if not commit_pending:
-                await _finish_rule_rescan_with_retry(
-                    rule_id, was_active=was_active and scan_complete,
-                    owner_token=owner_token, queue_rebuilt=scan_complete,
-                )
-    except _RescanReleaseFailed:
-        await _report_rescan_release_failure(rule_id=rule_id, chat_id=chat_id,
-                                             message_id=message_id, scan_complete=scan_complete)
-        return
-    except Exception as exc:
-        if commit_pending:
-            await _report_rescan_unknown(rule_id=rule_id, chat_id=chat_id, message_id=message_id)
-            return
-        if isinstance(exc, RescanBlocked):
-            logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
-        else:
-            logger.exception("Ошибка перезапуска очереди правила %s", rule_id)
-        await _show_rule_processing_screen(
-            chat_id=chat_id, message_id=message_id,
-            text=f"❌ Не удалось начать заново правило #{rule_id}.\n\nПричина: {str(exc)[:300]}",
-            reply_markup=build_rescan_rule_keyboard(rule_id),
-        )
-        return
-
-    summary = (f"✅ Правило #{rule_id}: очередь начата заново.\n"
-               f"Новых сообщений источника: {parsed_count}")
-    await _complete_rescan_job(
-        rule_id=rule_id, rule=rule, was_active=was_active,
-        chat_id=chat_id, message_id=message_id,
-        summary=summary, fallback_text=summary + f"\nЗаписей в новой очереди: {rebuilt_count}",
+async def _run_rescan_rule_fresh_job(*, rule_id: int, chat_id: int, message_id: int, admin_id: int) -> None:
+    await _run_rescan_rule_job(
+        rule_id=rule_id, chat_id=chat_id, message_id=message_id, admin_id=admin_id, fresh=True,
     )
 
 
-async def _run_rescan_rule_keep_job(
-    *,
-    rule_id: int,
-    chat_id: int,
-    message_id: int,
-    admin_id: int,
+async def _run_rescan_rule_keep_job(*, rule_id: int, chat_id: int, message_id: int, admin_id: int) -> None:
+    await _run_rescan_rule_job(
+        rule_id=rule_id, chat_id=chat_id, message_id=message_id, admin_id=admin_id, fresh=False,
+    )
+
+
+def _rule_rescan_scope(rule) -> tuple:
+    return (str(rule.source_id), rule.source_thread_id,
+            str(rule.target_id), rule.target_thread_id, rule.mode)
+
+
+async def _run_rescan_rule_job(
+    *, rule_id: int, fresh: bool = False, admin_id: int = 0,
+    chat_id: int = 0, message_id: int = 0, recovery: bool = False,
+    recovery_phase: str | None = None,
 ) -> None:
+    """Both UI modes and the recovery loop use the same durable operation."""
+    owner_token = None
+    operation = None
     scan_complete = False
     commit_pending = False
+    parsed_count = rebuilt_count = 0
     try:
-        rule = await run_db(db.get_rule, rule_id)
-        if not rule:
-            await _show_rule_processing_screen(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=f"❌ Правило #{rule_id} не найдено",
+        rule = None
+        if recovery:
+            claim_kwargs = {"phase": recovery_phase} if recovery_phase else {}
+            claimed = await rescan_db(run_db, db.claim_interrupted_rule_rescan, rule_id, **claim_kwargs)
+            if claimed is None:
+                return
+            owner_token, operation = claimed
+            fresh = operation["mode"] == "fresh"
+            admin_id = int(operation["actor_id"])
+            was_active = bool(operation["was_active"])
+        else:
+            rule = await run_db(db.get_rule, rule_id)
+            if not rule:
+                await _show_rule_processing_screen(
+                    chat_id=chat_id, message_id=message_id,
+                    text=f"❌ Правило #{rule_id} не найдено",
+                )
+                return
+            was_active, owner_token = await rescan_db(
+                run_db, db.begin_rule_rescan, rule_id, fresh=fresh,
+                actor_id=admin_id, expected_scope=_rule_rescan_scope(rule),
             )
+            operation = await run_db(db.get_rule_rescan_operation, rule_id, owner_token)
+            if operation is None:
+                raise RescanBlocked("Не найдена сохранённая операция пересканирования")
+
+        if operation["phase"] == "rebuilt":
+            # The previous transaction committed, but its response or
+            # owner release was lost. Never create another publication cycle.
+            scan_complete = True
+            await _finish_rule_rescan_with_retry(
+                rule_id, was_active=was_active, owner_token=owner_token, queue_rebuilt=True,
+            )
+            # Recovery audit is committed atomically with owner release.
+            invalidate_preview_cache(rule_id)
+            invalidate_rule_card_cache(rule_id)
+            return
+        if operation["phase"] != "scanning":
+            raise RescanBlocked("Неизвестный этап пересканирования")
+
+        if int(operation["attempt"]) > 3:
+            # Claim has established that no rebuild transaction committed.
+            # Do not leave a permanently failing scan in an infinite loop.
+            await _finish_rule_rescan_with_retry(
+                rule_id, was_active=False, owner_token=owner_token, queue_rebuilt=False,
+            )
+            # Exhausted recovery is audited by the release transaction.
+            invalidate_preview_cache(rule_id)
+            invalidate_rule_card_cache(rule_id)
+            logger.error("RESCAN_RECOVERY_EXHAUSTED | rule_id=%s | rule_paused", rule_id)
             return
 
-        was_active, owner_token = await run_db(db.begin_rule_rescan, rule_id)
-        try:
-            cancel_local_rule_delivery_jobs(rule_id)
-            await _show_rule_processing_screen(
-                chat_id=chat_id, message_id=message_id,
-                text=f"🔄 Пересканирование правила #{rule_id}\n\nРежим: сохранить позицию\nЧитаем историю источника.",
-                terminal=False,
-            )
-            scan_start_max_message_id = await run_db(
-                db.get_rule_scan_start_max_message_id, rule_id,
-            )
-            old_next_run_at = await run_db(db.get_rule_next_run_at, rule_id)
-            saved_first_pending_message_id = await run_db(
-                db.get_rule_first_pending_message_id, rule_id,
-            )
-            if saved_first_pending_message_id is None:
-                previous_sent = await run_db(db.get_rule_sent_message_ids, rule_id)
-                if previous_sent:
-                    saved_first_pending_message_id = max(previous_sent) + 1
+        async with maintain_rescan_lease(db, run_db, rule_id, owner_token):
+            if rule is None:
+                rule = await run_db(db.get_rule, rule_id)
+            scope = tuple(operation["scope"])
+            if rule is None or _rule_rescan_scope(rule) != scope:
+                raise RescanBlocked("Настройки источника или получателя изменились")
 
-            parsed_count, seen_message_ids = await _scan_rule_source(rule)
-            missing = await _verify_rescan_live_arrivals(
-                rule_id, rule, scan_start_max_message_id, seen_message_ids,
-            )
+            cancel_local_rule_delivery_jobs(rule_id)
+            watermark = int(operation["watermark"])
+            before_message_id = operation["before_message_id"]
+            if not recovery:
+                mode_text = "Начать заново" if fresh else "Сохранить позицию"
+                await _show_rule_processing_screen(
+                    chat_id=chat_id, message_id=message_id,
+                    text=f"🔄 Пересканирование правила #{rule_id}\n\nРежим: {mode_text}\nЧитаем историю источника.",
+                    reply_markup=_rescan_wait_keyboard(rule_id),
+                    terminal=False,
+                )
+            parsed_count, seen_message_ids = await _scan_rule_source(rule, rule_id, owner_token)
+            missing = await _verify_rescan_live_arrivals(rule_id, rule, watermark, seen_message_ids)
+
             commit_pending = True
-            rebuilt_count, removed_stale, removed_before, quarantined = await run_db(
-                db.rebuild_rule_keep_position, rule_id,
-                owner_token=owner_token, allowed_message_ids=seen_message_ids,
-                include_newer_than_message_id=scan_start_max_message_id,
-                checked_missing_message_ids=missing,
-                before_message_id=saved_first_pending_message_id,
-                expected_scope=(str(rule.source_id), rule.source_thread_id,
-                                str(rule.target_id), rule.target_thread_id, rule.mode),
-            )
+            kwargs = dict(owner_token=owner_token, allowed_message_ids=seen_message_ids,
+                          include_newer_than_message_id=watermark, checked_missing_message_ids=missing,
+                          expected_scope=scope)
+            if fresh:
+                archived, old_count, rebuilt_count = await rescan_db(
+                    run_db, db.restart_rule_queue, rule_id, **kwargs,
+                )
+                audit = {
+                    "event_type": "rule_rescanned_fresh", "old_value": None,
+                    "new_value": {"next_run_at": utc_now_iso()},
+                    "extra": {"mode": "fresh", "rebuilt_count": rebuilt_count,
+                              "archived_attempts": archived, "replayed_deliveries": old_count},
+                }
+            else:
+                rebuilt_count, removed_stale, removed_before, quarantined = await rescan_db(
+                    run_db, db.rebuild_rule_keep_position, rule_id,
+                    before_message_id=before_message_id, **kwargs,
+                )
+                old_next_run_at = operation["old_next_run_at"]
+                audit = {
+                    "event_type": "rule_rescanned_keep_position",
+                    "old_value": {"preserved_sent_history": True,
+                                  "saved_first_pending_message_id": before_message_id,
+                                  "old_next_run_at": old_next_run_at},
+                    "new_value": None,
+                    "extra": {"mode": "keep_position", "rebuilt_count": rebuilt_count,
+                              "preserved_sent_history": True, "excluded_before": removed_before,
+                              "removed_stale": removed_stale, "quarantined": quarantined,
+                              "source_id": str(rule.source_id), "source_thread_id": rule.source_thread_id},
+                }
             scan_complete = True
             commit_pending = False
-            audit = {
-                "event_type": "rule_rescanned_keep_position",
-                "old_value": {
-                    "preserved_sent_history": True,
-                    "saved_first_pending_message_id": saved_first_pending_message_id,
-                    "old_next_run_at": old_next_run_at,
-                },
-                "new_value": {"next_run_at": old_next_run_at},
-                "extra": {
-                    "mode": "keep_position", "parsed_count": parsed_count,
-                    "rebuilt_count": rebuilt_count, "preserved_sent_history": True,
-                    "excluded_before": removed_before, "removed_stale": removed_stale,
-                    "quarantined": quarantined, "source_id": str(rule.source_id),
-                    "source_thread_id": rule.source_thread_id,
-                },
-            }
+            audit["extra"].update(parsed_count=parsed_count, seen_message_count=len(seen_message_ids),
+                                  recovered=recovery)
             await _write_rescan_audit(rule_id, admin_id, audit)
-        except RescanBlocked:
-            # A repository safety rejection rolls back the transaction.
-            commit_pending = False
-            raise
-        finally:
-            if not commit_pending:
-                await _finish_rule_rescan_with_retry(
-                    rule_id, was_active=was_active and scan_complete,
-                    owner_token=owner_token, queue_rebuilt=scan_complete,
-                )
+        was_active = await _finish_rule_rescan_with_retry(
+            rule_id, was_active=was_active, owner_token=owner_token, queue_rebuilt=True,
+        )
     except _RescanReleaseFailed:
-        await _report_rescan_release_failure(rule_id=rule_id, chat_id=chat_id,
-                                             message_id=message_id, scan_complete=scan_complete)
+        if not recovery:
+            await _report_rescan_release_failure(rule_id=rule_id, chat_id=chat_id,
+                                                 message_id=message_id, scan_complete=scan_complete)
+        else:
+            logger.exception("RESCAN_RECOVERY_RELEASE_FAILED | rule_id=%s", rule_id)
         return
     except Exception as exc:
-        if commit_pending:
-            await _report_rescan_unknown(rule_id=rule_id, chat_id=chat_id, message_id=message_id)
-            return
+        # A cancelled task is deliberately not caught. A lost transaction
+        # response, owner, or transient parser failure is resolved by a fresh
+        # DB claim after the lease expires, not by clearing a possibly live lock.
         if isinstance(exc, RescanBlocked):
+            commit_pending = False  # Deterministic transaction rejection, not a lost commit.
             logger.warning("RESCAN_BLOCKED | rule_id=%s | reason=%s", rule_id, exc)
         else:
-            logger.exception("Ошибка перескана правила %s с сохранением позиции: %s", rule_id, exc)
-
-        await _show_rule_processing_screen(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=(
-                f"❌ Не удалось пересканировать правило #{rule_id} с сохранением позиции.\n\n"
-                f"Причина: {str(exc)[:300]}"
-            ),
-            reply_markup=build_rescan_rule_keyboard(rule_id),
-        )
+            logger.exception("RESCAN_FAILED | rule_id=%s | automatic_recovery=%s",
+                             rule_id, owner_token is not None)
+        invalidate_preview_cache(rule_id)
+        invalidate_rule_card_cache(rule_id)
+        if recovery:
+            return
+        if commit_pending:
+            await _report_rescan_unknown(rule_id=rule_id, chat_id=chat_id, message_id=message_id)
+        elif owner_token is not None:
+            await _show_rule_processing_screen(
+                chat_id=chat_id, message_id=message_id,
+                text=f"⚠️ Пересканирование правила #{rule_id} прервано.\n\n"
+                     "Правило остановлено до автоматического восстановления."
+                     + (f"\nПричина: {str(exc)[:300]}" if isinstance(exc, RescanBlocked) else ""),
+                reply_markup=_rescan_wait_keyboard(rule_id),
+            )
+        else:
+            await _show_rule_processing_screen(
+                chat_id=chat_id, message_id=message_id,
+                text=f"❌ Не удалось запустить пересканирование правила #{rule_id}.\n\n"
+                     "Возможно, операция уже выполняется. Проверьте карточку правила.",
+                reply_markup=build_rescan_rule_keyboard(rule_id),
+            )
         return
 
+    if recovery:
+        # The original message may now show an unrelated screen. Never edit it
+        # after restart; refresh the existing card cache and audit instead.
+        invalidate_preview_cache(rule_id)
+        invalidate_rule_card_cache(rule_id)
+        logger.info("RESCAN_RECOVERY_COMPLETE | rule_id=%s", rule_id)
+        return
     summary = (
+        f"✅ Правило #{rule_id}: очередь начата заново.\nНовых сообщений источника: {parsed_count}"
+        if fresh else
         f"✅ Правило #{rule_id} пересканировано с сохранением позиции.\n"
-        f"Новых записей источника: {parsed_count}\n"
-        f"Готовых записей в новой очереди: {rebuilt_count}"
+        f"Новых записей источника: {parsed_count}\nГотовых записей в новой очереди: {rebuilt_count}"
     )
     await _complete_rescan_job(
         rule_id=rule_id, rule=rule, was_active=was_active,
-        chat_id=chat_id, message_id=message_id,
-        summary=summary,
+        chat_id=chat_id, message_id=message_id, summary=summary,
+        fallback_text=summary + f"\nЗаписей в новой очереди: {rebuilt_count}" if fresh else None,
     )
+
+
+async def _rescan_recovery_loop(stop_event: asyncio.Event) -> None:
+    """Release committed queues independently of the single history reader."""
+    global rescan_recovery_job
+    try:
+        while not stop_event.is_set() and runtime_ownership.can_poll:
+            try:
+                # A rebuilt operation only needs a DB claim/release. Never
+                # let a long Telegram history read hold these rules paused.
+                for rule_id in await run_db(db.list_expired_rule_rescans, phase="rebuilt"):
+                    if stop_event.is_set() or not runtime_ownership.can_poll:
+                        return
+                    await _run_rescan_rule_job(rule_id=rule_id, recovery=True, recovery_phase="rebuilt")
+                if stop_event.is_set() or not runtime_ownership.can_poll:
+                    return
+                if rescan_recovery_job is not None and rescan_recovery_job.done():
+                    await asyncio.gather(rescan_recovery_job, return_exceptions=True)
+                    rescan_recovery_job = None
+                if rescan_recovery_job is None:
+                    pending = await run_db(db.list_expired_rule_rescans, phase="scanning", limit=1)
+                    if pending and not stop_event.is_set() and runtime_ownership.can_poll:
+                        rescan_recovery_job = create_background_task(
+                            _run_rescan_rule_job(rule_id=pending[0], recovery=True, recovery_phase="scanning"),
+                            name=f"rescan-recover:{pending[0]}",
+                        )
+            except Exception:
+                logger.exception("RESCAN_RECOVERY_LOOP_FAILED")
+            # DB-clock lease expiry requires periodic inspection.
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=15)
+            except TimeoutError:
+                pass
+    finally:
+        if rescan_recovery_job is not None:
+            if not rescan_recovery_job.done() and not rescan_recovery_job.cancelling():
+                rescan_recovery_job.cancel()
+            await asyncio.gather(rescan_recovery_job, return_exceptions=True)
+            rescan_recovery_job = None
+
+
+def _start_rescan_recovery_runtime() -> None:
+    global rescan_recovery_task, rescan_recovery_stop
+    if runtime_ownership.can_poll and (rescan_recovery_task is None or rescan_recovery_task.done()):
+        rescan_recovery_stop = asyncio.Event()
+        rescan_recovery_task = create_background_task(
+            _rescan_recovery_loop(rescan_recovery_stop), name="rescan-recovery",
+        )
 
 
 @dataclass(slots=True)
@@ -7156,9 +7230,9 @@ async def handle_enable_rule_callback(callback: CallbackQuery):
         )
     else:
         await answer_callback_safe_once(callback, "❌ Не удалось включить правило", show_alert=True)
-        await edit_message_text_safe(
-            message=callback.message,
-            text="❌ Не удалось включить правило",
+        await refresh_rule_card_for_actor(
+            callback, rule_id,
+            prefix_text="❌ Правило не включено. Если пересканирование прервано, завершите его через существующее меню пересканирования.",
         )
 
 @dp.callback_query(lambda c: c.data.startswith("delete_rule:") or c.data.startswith("user_rule_delete:") or c.data.startswith("delete_rule_execute:"))
@@ -8562,23 +8636,119 @@ def _start_repost_campaign_runtime_tasks(*, role: str) -> None:
     repost_campaign_runtime_tasks.start()
 
 
+async def _drain_with_publication_flush(drain) -> None:
+    """Persist publication evidence even while a worker is stuck in cleanup."""
+    raw_client = getattr(telethon_client, "raw", telethon_client)
+    flush = getattr(raw_client, "persist_publication_evidence", None)
+    if not callable(flush):
+        flush = getattr(raw_client, "flush_publication_inbox", None)
+    if not callable(flush):
+        await drain()
+        return
+
+    stop = asyncio.Event()
+
+    async def persist_until_drained() -> None:
+        while not stop.is_set():
+            try:
+                # A started evidence write must settle; wait_for is not an
+                # absolute I/O deadline. The production path never replays
+                # durable journal entries here.
+                await flush()
+            except Exception:
+                logger.exception("PUBLICATION_SHUTDOWN_DRAIN_FLUSH_FAILED")
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
+
+    flusher = asyncio.create_task(persist_until_drained(), name="publication-drain-flush")
+    try:
+        await drain()
+    finally:
+        stop.set()
+        await wait_for_db_task(flusher)
+
+
 async def _shutdown_runtime(
     *,
     stop_workers_runtime: bool,
     close_dashboard_tasks: bool,
     close_telegram_clients: bool,
     close_bot_session: bool,
-) -> None:
-    global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, repost_campaign_runtime_tasks, channel_title_sync_task
+) -> bool:
+    global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, reaction_worker_stop, repost_campaign_runtime_tasks, channel_title_sync_task, rescan_recovery_task, rescan_recovery_stop
 
     runtime_ownership.begin_shutdown()
-    workers_drain_complete = True
-    if stop_workers_runtime:
-        try:
-            await stop_job_workers_runtime()
-        except Exception:
-            workers_drain_complete = False
-            logger.exception("JOB_WORKERS_SHUTDOWN_INCOMPLETE | keeping Telegram clients open")
+    # Signal every producer before awaiting any join. A scheduler SQL tick
+    # may still commit its already-started transaction; its jobs are durable.
+    if scheduler_runtime_task and not scheduler_runtime_task.done():
+        scheduler_runtime_task.cancel()
+    if rescan_recovery_stop is not None:
+        rescan_recovery_stop.set()
+    if reaction_worker_stop is not None:
+        reaction_worker_stop.set()
+    if rescan_recovery_job is not None and not rescan_recovery_job.done() and not rescan_recovery_job.cancelling():
+        rescan_recovery_job.cancel()
+    tasks = list(rule_ui_tasks.values())
+    for task in tasks:
+        task.cancel()
+
+    async def drain_producers():
+        global scheduler_runtime_task, rescan_recovery_task, rescan_recovery_stop
+        # Keep each owner alive until its SQL/Telegram work has settled.
+        # Consumer drains and evidence persistence run concurrently, so a
+        # blocked producer cannot keep them admitting new work.
+        if scheduler_runtime_task is not None:
+            await asyncio.gather(scheduler_runtime_task, return_exceptions=True)
+        scheduler_runtime_task = None
+        if rescan_recovery_task is not None:
+            await asyncio.gather(rescan_recovery_task, return_exceptions=True)
+        rescan_recovery_task = None
+        rescan_recovery_stop = None
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def drain_workers():
+        if stop_workers_runtime:
+            await stop_job_workers_runtime(wait_until_complete=True)
+
+    async def drain_campaigns():
+        nonlocal repost_campaign_runtime_tasks_local
+        if repost_campaign_runtime_tasks_local is not None:
+            await repost_campaign_runtime_tasks_local.stop(wait_until_complete=True)
+            repost_campaign_runtime_tasks_local = None
+
+    async def drain_reactions():
+        global reaction_worker_task, reaction_worker_stop
+        if reaction_worker_task is not None:
+            # Do not abandon in-flight reaction DB writes or Telegram calls.
+            await asyncio.gather(reaction_worker_task, return_exceptions=True)
+        reaction_worker_task = None
+        reaction_worker_stop = None
+
+    async def drain_consumers():
+        # All runtimes must stop admitting work even if another is stuck.
+        # Join all before propagating errors or closing clients.
+        results = await wait_for_db_task(asyncio.gather(
+            drain_producers(), drain_workers(), drain_campaigns(), drain_reactions(),
+            return_exceptions=True,
+        ))
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+
+    # Keep one flusher alive across producer and consumer joins.
+    repost_campaign_runtime_tasks_local = repost_campaign_runtime_tasks
+    drain_error = None
+    try:
+        await _drain_with_publication_flush(drain_consumers)
+    except (Exception, asyncio.CancelledError) as exc:
+        # Do not bypass the final evidence gate on a failed drain.
+        # Shared resources must not be closed on this error path.
+        drain_error = exc
+    repost_campaign_runtime_tasks = repost_campaign_runtime_tasks_local
+    workers_drain_complete = drain_error is None
+    campaign_drain_complete = drain_error is None
 
     if close_dashboard_tasks:
         tasks = list(dashboard_tasks.values())
@@ -8592,34 +8762,12 @@ async def _shutdown_runtime(
         await asyncio.gather(channel_title_sync_task, return_exceptions=True)
         channel_title_sync_task = None
 
-    campaign_drain_complete = True
-    if repost_campaign_runtime_tasks is not None:
-        try:
-            await repost_campaign_runtime_tasks.stop()
-        except Exception:
-            # Keep Telegram clients alive while campaign tasks still own RPCs.
-            campaign_drain_complete = False
-            logger.exception(
-                "REPOST_CAMPAIGN_SHUTDOWN_INCOMPLETE | keeping Telegram clients open"
-            )
-        else:
-            repost_campaign_runtime_tasks = None
-
     resource_drain_complete = workers_drain_complete and campaign_drain_complete
-
-    if scheduler_runtime_task and not scheduler_runtime_task.done():
-        scheduler_runtime_task.cancel()
-        await asyncio.gather(scheduler_runtime_task, return_exceptions=True)
-    scheduler_runtime_task = None
 
     if job_watchdog_task and not job_watchdog_task.done():
         job_watchdog_task.cancel()
         await asyncio.gather(job_watchdog_task, return_exceptions=True)
     job_watchdog_task = None
-    if reaction_worker_task and not reaction_worker_task.done():
-        reaction_worker_task.cancel()
-        await asyncio.gather(reaction_worker_task, return_exceptions=True)
-    reaction_worker_task = None
 
     # Drain publication evidence before stopping its retry tasks or closing
     # Telethon. If both the SQLite spool and fsynced fallback journal were
@@ -8627,10 +8775,12 @@ async def _shutdown_runtime(
     # the only in-memory scheduled-to-published mappings.
     if telethon_client is not None:
         raw_publication_client = getattr(telethon_client, "raw", telethon_client)
-        flush_publication = getattr(raw_publication_client, "flush_publication_inbox", None)
+        flush_publication = getattr(raw_publication_client, "persist_publication_evidence", None)
+        if not callable(flush_publication):
+            flush_publication = getattr(raw_publication_client, "flush_publication_inbox", None)
         if callable(flush_publication):
             try:
-                await asyncio.wait_for(flush_publication(), timeout=5)
+                await flush_publication()
             except Exception:
                 logger.exception("PUBLICATION_SHUTDOWN_FLUSH_FAILED | recovery=next_startup")
         while getattr(raw_publication_client, "publication_evidence_unpersisted", False):
@@ -8641,9 +8791,12 @@ async def _shutdown_runtime(
             )
             await asyncio.sleep(5)
             try:
-                await asyncio.wait_for(flush_publication(), timeout=5)
+                await flush_publication()
             except Exception:
                 logger.exception("PUBLICATION_SHUTDOWN_RETRY_FAILED")
+
+    if drain_error is not None:
+        raise drain_error
 
     await stop_background_tasks()
     if sender_service is not None and workers_drain_complete:
@@ -8655,7 +8808,10 @@ async def _shutdown_runtime(
             raw_telethon.publication_write_blocked = True
             await asyncio.sleep(5)
             try:
-                await asyncio.wait_for(raw_telethon.flush_publication_inbox(), timeout=5)
+                persist_evidence = getattr(raw_telethon, "persist_publication_evidence", None)
+                if not callable(persist_evidence):
+                    persist_evidence = raw_telethon.flush_publication_inbox
+                await persist_evidence()
             except Exception:
                 logger.exception("PUBLICATION_SHUTDOWN_RETRY_FAILED")
         try:
@@ -8712,6 +8868,7 @@ async def _start_bot_role() -> None:
     start_background_task(watchdog_loop(db), name="health-watchdog")
     _start_repost_campaign_runtime_tasks(role="bot")
     _start_channel_title_sync_runtime()
+    _start_rescan_recovery_runtime()
     logger.info("STARTUP | Роль UI (bot) запущена")
     await dp.start_polling(
         bot,
@@ -8751,7 +8908,7 @@ async def _start_worker_role() -> None:
 
 
 async def _start_all_role() -> None:
-    global posting_active, scheduler_runtime_task, job_watchdog_task, reaction_worker_task
+    global posting_active, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, reaction_worker_stop
     runtime_ownership.bind("all")
     posting_active = False
     await _init_db_runtime()
@@ -8763,6 +8920,7 @@ async def _start_all_role() -> None:
     start_background_task(watchdog_loop(db), name="health-watchdog")
     _start_repost_campaign_runtime_tasks(role="all")
     _start_channel_title_sync_runtime()
+    _start_rescan_recovery_runtime()
     if scheduler_runtime_task is None or scheduler_runtime_task.done():
         scheduler_runtime_task = create_background_task(
             run_scheduler_loop(
@@ -8775,7 +8933,8 @@ async def _start_all_role() -> None:
         job_watchdog_task = create_background_task(run_watchdog_loop(db, interval_seconds=10.0))
     if reaction_worker_task is None or reaction_worker_task.done():
         reaction_worker = ReactionWorker(db=db, worker_id="reaction-worker-1", poll_interval_sec=2.0, lock_timeout_seconds=300)
-        reaction_worker_task = create_background_task(reaction_worker.run_forever())
+        reaction_worker_stop = asyncio.Event()
+        reaction_worker_task = create_background_task(reaction_worker.run_forever(stop_event=reaction_worker_stop))
         logger.info("Reaction worker запущен: reaction-worker-1")
     await start_job_workers_runtime(resume=True)
     start_background_task(_supervise_job_workers(), name="job-workers-supervisor")
@@ -8804,8 +8963,14 @@ async def start_job_workers_runtime(*, resume: bool = False) -> None:
     }, resume=resume)
 
 
-async def stop_job_workers_runtime() -> None:
-    await job_workers.stop(timeout_sec=WORKER_RESOURCE_POLICY.graceful_shutdown_timeout_sec + 20)
+async def stop_job_workers_runtime(*, wait_until_complete: bool = False) -> None:
+    if wait_until_complete:
+        await job_workers.stop(
+            timeout_sec=WORKER_RESOURCE_POLICY.graceful_shutdown_timeout_sec + 20,
+            wait_until_complete=True,
+        )
+    else:
+        await job_workers.stop(timeout_sec=WORKER_RESOURCE_POLICY.graceful_shutdown_timeout_sec + 20)
 
 
 def _register_user_saas_handlers() -> None:

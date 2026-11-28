@@ -25,8 +25,11 @@ in keep-position; incomplete albums are rebuilt as a whole, and newly
 discovered older posts before the saved cursor are excluded rather than
 rewinding it. Newer arrivals remain eligible. Rebuilt rows receive fresh
 delivery IDs and therefore fresh publication keys. No old quarantine is applied.
-A parser failure releases the rescan owner but leaves the rule paused; an
-unknown database commit retains the owner for inspection.
+A parser failure or process interruption keeps the durable operation paused
+until the recovery supervisor can acquire its expired lease. An unknown commit
+is resolved from the per-operation phase, stored atomically with the rebuild.
+The original cursor and mode are reused, never inferred from partial parser writes.
+See [durable rescan and shutdown](durable-rescan-shutdown.md).
 
 Unrelated rules, existing reaction jobs and advertising cleanup are not cancelled.
 Archived receipts do not block manual rollback or clearing the new queue;

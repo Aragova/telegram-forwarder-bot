@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -447,6 +448,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
             rescan_owner_token TEXT NULL,
             rescan_started_at TIMESTAMPTZ NULL,
+            rescan_operation JSONB NULL,
+            rescan_lease_until TIMESTAMPTZ NULL,
             rescan_queue_built BOOLEAN NOT NULL DEFAULT FALSE,
             rescan_confirmation_token TEXT NULL,
             rescan_confirmation_actor BIGINT NULL,
@@ -885,6 +888,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_owner_token TEXT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_started_at TIMESTAMPTZ NULL;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_operation JSONB NULL;
+        ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_lease_until TIMESTAMPTZ NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_queue_built BOOLEAN NOT NULL DEFAULT FALSE;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_confirmation_token TEXT NULL;
         ALTER TABLE routing ADD COLUMN IF NOT EXISTS rescan_confirmation_actor BIGINT NULL;
@@ -2912,7 +2917,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
 
             with self.connect() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT id FROM routing WHERE id=%s AND rescan_owner_token IS NULL FOR UPDATE", (rule_id,))
+                    cur.execute("SELECT id FROM routing WHERE id=%s AND rescan_owner_token IS NULL AND rescan_operation IS NULL FOR UPDATE", (rule_id,))
                     if not cur.fetchone():
                         return None
                     cur.execute("""SELECT 1 FROM telegram_publication_receipts
@@ -3084,7 +3089,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     cur.execute(
                         """
                         UPDATE routing
-                        SET next_run_at = %s
+                        SET next_run_at = %s, rescan_operation=NULL
                         WHERE id = %s
                         """,
                         (next_retry_iso_str, rule_id),
@@ -3743,6 +3748,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         post_id: int,
         source_channel: str,
         source_thread_id: int | None,
+        *,
+        exclude_rule_id: int | None = None,
     ) -> None:
         with conn.cursor() as cur:
             if source_thread_id is None:
@@ -3770,6 +3777,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             message_id = self._get_post_message_id_conn(conn, post_id)
             now_iso = utc_now_iso()
             for rule in rules:
+                if exclude_rule_id is not None and int(rule["id"]) == exclude_rule_id:
+                    # The rescan transaction alone may replace its own queue.
+                    continue
                 if self._is_self_target_echo_post_for_rule_conn(
                     conn,
                     rule_id=int(rule["id"]),
@@ -4206,11 +4216,26 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
             return post_id
 
-    def save_post_batch(self, posts_data, *, preserve_existing_deliveries: bool = False):
+    def save_post_batch(
+        self, posts_data, *, preserve_existing_deliveries: bool = False,
+        rescan_owner: tuple[int, str] | None = None,
+    ):
         count = 0
         with self.connect() as conn:
             with conn.cursor() as cur:
+                route = None
+                if rescan_owner is not None:
+                    if not preserve_existing_deliveries:
+                        raise ValueError("Rescan cannot replace source deliveries")
+                    route = self._lock_rescan_owner(cur, *rescan_owner)
+                    if route.get("rescan_operation") is None:
+                        raise RescanBlocked("Не найдена сохранённая операция пересканирования")
                 for message_id, source_channel, source_thread_id, content, media_group_id in posts_data:
+                    if route is not None and (
+                        str(source_channel) != str(route["source_id"])
+                        or source_thread_id != route["source_thread_id"]
+                    ):
+                        raise RescanBlocked("Источник пересканирования изменился")
                     cur.execute(
                         """
                         INSERT INTO posts(
@@ -4289,9 +4314,15 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                             ),
                         )
                     if inserted or not preserve_existing_deliveries:
-                        self._create_deliveries_for_post_conn(
-                            conn, post_id, str(source_channel), source_thread_id,
-                        )
+                        if rescan_owner is None:
+                            self._create_deliveries_for_post_conn(
+                                conn, post_id, str(source_channel), source_thread_id,
+                            )
+                        else:
+                            self._create_deliveries_for_post_conn(
+                                conn, post_id, str(source_channel), source_thread_id,
+                                exclude_rule_id=rescan_owner[0],
+                            )
 
             conn.commit()
             return count
@@ -4641,8 +4672,11 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE routing SET is_active = %s WHERE id = %s AND rescan_owner_token IS NULL",
-                    (bool(is_active), rule_id),
+                    "UPDATE routing SET is_active = %s, "
+                    "rescan_operation=CASE WHEN %s THEN NULL ELSE rescan_operation END "
+                    "WHERE id = %s AND rescan_owner_token IS NULL "
+                    "AND (NOT %s OR rescan_operation IS NULL)",
+                    (bool(is_active), bool(is_active), rule_id, bool(is_active)),
                 )
                 updated = cur.rowcount > 0
 
@@ -4669,8 +4703,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 cur.execute(
                     """
                     UPDATE routing
-                    SET is_active = TRUE
-                    WHERE id = %s AND rescan_owner_token IS NULL
+                    SET is_active = TRUE, rescan_operation=NULL
+                    WHERE id = %s AND rescan_owner_token IS NULL AND rescan_operation IS NULL
                     RETURNING id, source_id, source_thread_id, rescan_queue_built
                     """,
                     (int(rule_id),),
@@ -4785,7 +4819,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     """UPDATE routing
                        SET rescan_confirmation_token=%s, rescan_confirmation_actor=%s,
                            rescan_confirmation_until=NOW() + INTERVAL '15 minutes'
-                       WHERE id=%s AND rescan_owner_token IS NULL
+                       WHERE id=%s AND (rescan_owner_token IS NULL OR
+                           (rescan_operation IS NULL AND rescan_lease_until IS NULL
+                            AND rescan_started_at IS NOT NULL))
                        RETURNING id""",
                     (str(token), int(actor_id), int(rule_id)),
                 )
@@ -4806,7 +4842,10 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                        WHERE id=%s AND rescan_confirmation_token=%s
                          AND rescan_confirmation_actor=%s
                          AND rescan_confirmation_until>NOW()
-                         AND rescan_owner_token IS NULL
+                         AND (rescan_owner_token IS NULL OR
+                           (rescan_operation IS NULL AND rescan_lease_until IS NULL
+                            AND rescan_started_at IS NOT NULL
+                            AND rescan_confirmation_until-INTERVAL '15 minutes'>=rescan_started_at))
                        RETURNING id""",
                     (int(rule_id), str(token), int(actor_id)),
                 )
@@ -4814,36 +4853,57 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             conn.commit()
         return consumed
 
-    def begin_rule_rescan(self, rule_id: int, *, fresh: bool = False) -> tuple[bool, str]:
-        """Acquire a PostgreSQL-backed exclusive rescan owner before parsing.
+    def begin_rule_rescan(
+        self, rule_id: int, *, fresh: bool = False, actor_id: int | None = None,
+        expected_scope: tuple | None = None,
+    ) -> tuple[bool, str]:
+        """Pause a rule and persist its requested operation before any history read.
 
-        Ownership survives individual DB transactions and excludes independent
-        handlers/processes. Crashed scans remain paused and require explicit
-        operator recovery rather than risking an unverified automatic replay.
+        UI callers supply actor_id. The low-level legacy contract (no actor)
+        remains available to repository callers but is never auto-replayed.
+        A legacy stranded owner can only be replaced by an explicit UI rescan.
         """
-        owner_token = uuid.uuid4().hex
+        # Distinguish new low-level owners from genuinely old rows. A UI
+        # request must not replace a still-running low-level operation.
+        owner_token = ("local:" if actor_id is None else "") + uuid.uuid4().hex
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT is_active, rescan_owner_token FROM routing WHERE id = %s FOR UPDATE",
+                    "SELECT is_active, rescan_owner_token, source_id, source_thread_id, "
+                    "target_id,target_thread_id,mode,tenant_id,next_run_at,rescan_started_at,"
+                    "rescan_operation,rescan_lease_until FROM routing WHERE id = %s FOR UPDATE",
                     (int(rule_id),),
                 )
                 rule = cur.fetchone()
                 if rule is None:
                     raise RescanBlocked(f"Правило #{rule_id} не найдено")
-                if rule["rescan_owner_token"] is not None:
+                legacy_owner = (
+                    rule["rescan_owner_token"] is not None and actor_id is not None
+                    and not str(rule["rescan_owner_token"]).startswith("local:")
+                    and rule.get("rescan_operation") is None
+                    and rule.get("rescan_lease_until") is None
+                    and rule.get("rescan_started_at") is not None
+                )
+                if rule["rescan_owner_token"] is not None and not legacy_owner:
                     raise RescanBlocked(
                         "Пересканирование этого правила уже выполняется. "
-                        "Повторный запуск запрещён до завершения текущего."
+                        "Прерванная операция восстанавливается автоматически."
                     )
+                if actor_id is None and rule.get("rescan_operation") is not None:
+                    raise RescanBlocked("Завершите пересканирование через существующее меню правила")
+                if expected_scope is not None and expected_scope != self._rescan_scope(rule):
+                    raise RescanBlocked("Настройки правила изменились; повторите пересканирование")
+                was_active = bool(rule["is_active"]) and not legacy_owner
                 cur.execute(
                     """
                     UPDATE routing
                     SET is_active = FALSE, rescan_owner_token = %s,
-                        rescan_started_at = NOW()
-                    WHERE id = %s AND rescan_owner_token IS NULL
+                        rescan_started_at = NOW(), rescan_operation=NULL,
+                        rescan_lease_until=NULL, rescan_confirmation_token=NULL,
+                        rescan_confirmation_actor=NULL,rescan_confirmation_until=NULL
+                    WHERE id = %s AND rescan_owner_token IS NOT DISTINCT FROM %s
                     """,
-                    (owner_token, int(rule_id)),
+                    (owner_token, int(rule_id), rule["rescan_owner_token"]),
                 )
                 if cur.rowcount != 1:
                     raise RescanBlocked("Другое пересканирование получило блокировку")
@@ -4867,41 +4927,211 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                        WHERE rule_id=%s AND status='processing'""",
                     (int(rule_id),),
                 )
+                if actor_id is not None:
+                    # Use the same logical queue cursor as the interactive scan,
+                    # before the parser can discover older messages.
+                    before = None
+                    retry = rule.get("rescan_operation")
+                    if (not fresh and not was_active and retry
+                            and retry.get("phase") == "retry_pending"
+                            and retry.get("mode") == "keep"
+                            and tuple(retry["scope"]) == self._rescan_scope(rule)
+                            and retry["tenant_id"] == rule["tenant_id"]):
+                        before = retry["before_message_id"]
+                    elif not fresh:
+                        before = self._rule_first_pending_message_id(cur, rule_id, rule["mode"])
+                        if before is None:
+                            cur.execute(
+                                """SELECT MAX(p.message_id) AS last_id FROM deliveries d
+                                   JOIN posts p ON p.id=d.post_id
+                                   WHERE d.rule_id=%s AND d.status='sent'""", (int(rule_id),),
+                            )
+                            last_id = cur.fetchone()["last_id"]
+                            before = int(last_id) + 1 if last_id is not None else None
+                    cur.execute(
+                        """SELECT COALESCE(MAX(message_id),0) AS watermark FROM posts
+                           WHERE source_channel=%s AND source_thread_id IS NOT DISTINCT FROM %s""",
+                        (str(rule["source_id"]), rule["source_thread_id"]),
+                    )
+                    operation = {
+                        "mode": "fresh" if fresh else "keep",
+                        "phase": "scanning", "attempt": 1, "actor_id": int(actor_id),
+                        "was_active": was_active, "scope": list(self._rescan_scope(rule)),
+                        "tenant_id": rule["tenant_id"], "before_message_id": before,
+                        "watermark": int(cur.fetchone()["watermark"]),
+                        "old_next_run_at": (str(rule["next_run_at"])
+                                            if rule["next_run_at"] is not None else None),
+                    }
+                    cur.execute(
+                        """UPDATE routing SET rescan_operation=%s::jsonb,
+                               rescan_lease_until=clock_timestamp()+INTERVAL '120 seconds'
+                           WHERE id=%s AND rescan_owner_token=%s""",
+                        (_json_dumps(operation), int(rule_id), owner_token),
+                    )
             conn.commit()
-        return bool(rule["is_active"]), owner_token
+        return was_active, owner_token
+
+    @staticmethod
+    def _rescan_scope(rule) -> tuple:
+        return (
+            str(rule["source_id"]), rule["source_thread_id"],
+            str(rule["target_id"]), rule["target_thread_id"], rule["mode"],
+        )
+
+    def get_rule_rescan_operation(self, rule_id: int, owner_token: str) -> dict | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT rescan_operation FROM routing
+                       WHERE id=%s AND rescan_owner_token=%s""",
+                    (int(rule_id), owner_token),
+                )
+                row = cur.fetchone()
+                return dict(row["rescan_operation"]) if row and row["rescan_operation"] else None
+
+    def list_expired_rule_rescans(self, limit: int = 20, *, phase: str | None = None) -> list[int]:
+        """Inspect only durable interrupted operations, never ordinary rules."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id FROM routing WHERE rescan_operation IS NOT NULL
+                       AND rescan_owner_token IS NOT NULL
+                       AND rescan_lease_until<=clock_timestamp()
+                       AND (%s::text IS NULL OR rescan_operation->>'phase'=%s)
+                       ORDER BY rescan_lease_until,id LIMIT %s FOR UPDATE SKIP LOCKED""",
+                    (phase, phase, max(1, min(int(limit), 100))),
+                )
+                return [int(row["id"]) for row in cur.fetchall()]
+
+    def claim_interrupted_rule_rescan(self, rule_id: int, *, phase: str | None = None) -> tuple[str, dict] | None:
+        """Rotate the fencing token; a previous owner cannot save or rebuild."""
+        token = uuid.uuid4().hex
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE routing SET rescan_owner_token=%s,
+                           rescan_lease_until=clock_timestamp()+INTERVAL '120 seconds',
+                           rescan_operation=jsonb_set(rescan_operation,'{attempt}',
+                               to_jsonb(COALESCE((rescan_operation->>'attempt')::int,1)+1))
+                       WHERE id IN (SELECT id FROM routing WHERE id=%s FOR UPDATE SKIP LOCKED)
+                         AND rescan_operation IS NOT NULL
+                         AND rescan_owner_token IS NOT NULL
+                         AND rescan_lease_until<=clock_timestamp()
+                         AND (%s::text IS NULL OR rescan_operation->>'phase'=%s)
+                       RETURNING rescan_operation""", (token, int(rule_id), phase, phase),
+                )
+                row = cur.fetchone()
+                return (token, dict(row["rescan_operation"])) if row else None
+
+    def renew_rule_rescan(self, rule_id: int, owner_token: str) -> bool:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE routing SET rescan_lease_until=clock_timestamp()+INTERVAL '120 seconds'
+                       WHERE id=%s AND rescan_owner_token=%s
+                         AND rescan_operation IS NOT NULL
+                         AND rescan_lease_until>clock_timestamp()""",
+                    (int(rule_id), owner_token),
+                )
+                return cur.rowcount == 1
 
     def finish_rule_rescan(
         self, rule_id: int, *, was_active: bool, owner_token: str,
         queue_rebuilt: bool = False,
-    ) -> None:
-        """Only the original owner can resume or release a rescan."""
+    ) -> bool:
+        """Only the current owner can release a rescan; never start changed routes."""
         if not owner_token:
             raise ValueError("Missing rescan owner")
+        restored_active = bool(was_active)
+        release_key = hashlib.sha256(str(owner_token).encode()).hexdigest()
         with self.connect() as conn:
             with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT is_active, rescan_owner_token,source_id,source_thread_id,"
+                    "target_id,target_thread_id,mode,tenant_id,rescan_operation "
+                    "FROM routing WHERE id=%s FOR UPDATE", (int(rule_id),),
+                )
+                route = cur.fetchone()
+                operation = route.get("rescan_operation") if route else None
+                if (operation is not None and route["rescan_owner_token"] == owner_token
+                        and (tuple(operation["scope"]) != self._rescan_scope(route)
+                             or operation["tenant_id"] != route["tenant_id"])):
+                    restored_active = False
+                    logger.warning("RESCAN_SCOPE_CHANGED_ON_RELEASE | rule_id=%s", rule_id)
                 cur.execute(
                     """
                     UPDATE routing
                     SET is_active = %s, rescan_owner_token = NULL,
                         rescan_started_at = NULL,
-                        rescan_queue_built = rescan_queue_built OR %s
+                        rescan_queue_built = rescan_queue_built OR %s,
+                        rescan_operation=NULL,rescan_lease_until=NULL
                     WHERE id = %s AND rescan_owner_token = %s
+                      AND (rescan_operation IS NULL
+                           OR (rescan_operation->>'phase'='rebuilt' AND %s
+                               AND (rescan_operation->>'was_active')::boolean=%s)
+                           OR (rescan_operation->>'phase'='scanning' AND NOT %s AND NOT %s))
                     """,
-                    (bool(was_active), bool(queue_rebuilt), int(rule_id), str(owner_token)),
+                    (restored_active, bool(queue_rebuilt), int(rule_id), str(owner_token),
+                     bool(queue_rebuilt), bool(was_active), bool(queue_rebuilt), bool(was_active)),
                 )
                 if cur.rowcount != 1:
                     cur.execute(
-                        "SELECT rescan_owner_token,is_active,rescan_queue_built "
-                        "FROM routing WHERE id=%s FOR UPDATE", (int(rule_id),),
+                        """SELECT (new_value_json::jsonb->>'is_active')::boolean AS restored_active
+                           FROM audit_log WHERE rule_id=%s
+                           AND event_type IN ('rule_rescan_release','rule_rescan_recovered',
+                                              'rule_rescan_recovery_failed')
+                           AND extra_json::jsonb->>'release_key'=%s
+                           AND (extra_json::jsonb->>'queue_rebuilt')::boolean=%s
+                           ORDER BY id DESC LIMIT 1""",
+                        (int(rule_id), release_key, bool(queue_rebuilt)),
                     )
-                    current = cur.fetchone()
-                    if (not current or current["rescan_owner_token"] is not None
-                            or bool(current["is_active"]) != bool(was_active)
-                            or (queue_rebuilt and not current["rescan_queue_built"])):
+                    receipt = cur.fetchone()
+                    if receipt is None:
                         raise RuntimeError(
                             "Владелец пересканирования изменился; нельзя менять статус правила"
                         )
+                    restored_active = bool(receipt["restored_active"])
+                else:
+                    # Every release, including the low-level contract, has an
+                    # exact token receipt. Current routing flags prove nothing.
+                    event_type = "rule_rescan_release"
+                    attempt = int(operation["attempt"]) if operation else 0
+                    if attempt > 1:
+                        event_type = ("rule_rescan_recovered" if queue_rebuilt
+                                      else "rule_rescan_recovery_failed")
+                    new_value = {"is_active": restored_active}
+                    extra = {"attempt": attempt, "release_key": release_key,
+                             "queue_rebuilt": bool(queue_rebuilt)}
+                    if operation is not None:
+                        new_value["mode"] = operation["mode"]
+                        if queue_rebuilt:
+                            new_value["phase"] = "rebuilt"
+                        else:
+                            extra["reason"] = "retry_exhausted"
+                            # Keep the original cursor across manual retries even
+                            # if another rule has inserted older deliveries.
+                            # A partial scan may store posts without deliveries.
+                            # Only a verified rebuild may enable the rule.
+                            # Keep the marker for both modes and changed scopes;
+                            # begin_rule_rescan reuses a cursor only for matching keep.
+                            retry = {**operation, "phase": "retry_pending"}
+                            cur.execute(
+                                "UPDATE routing SET rescan_operation=%s::jsonb WHERE id=%s",
+                                (_json_dumps(retry), int(rule_id)),
+                            )
+                    cur.execute(
+                        """INSERT INTO audit_log(
+                            created_at,event_type,rule_id,admin_id,source_id,source_thread_id,
+                            target_id,target_thread_id,new_value_json,extra_json,tenant_id
+                        ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        (utc_now_iso(), event_type, int(rule_id),
+                         int(operation["actor_id"]) if operation else None,
+                         str(route["source_id"]), route["source_thread_id"],
+                         str(route["target_id"]), route["target_thread_id"],
+                         _json_dumps(new_value), _json_dumps(extra), route["tenant_id"]),
+                    )
             conn.commit()
+        return restored_active
 
     def _snapshot_rescan_echo_ids(self, cur, rule_id: int) -> None:
         """Keep existing self-loop output evidence when its delivery anchors are removed."""
@@ -4942,21 +5172,31 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
             """, (utc_now_iso(),int(rule_id)),
         )
 
-    def _lock_rescan_commit(self, cur, rule_id: int, owner_token: str, expected_scope):
+    def _lock_rescan_owner(self, cur, rule_id: int, owner_token: str, expected_scope=None):
         cur.execute(
             "SELECT is_active, rescan_owner_token, source_id, source_thread_id, "
-            "target_id, target_thread_id, mode, tenant_id FROM routing WHERE id = %s FOR UPDATE",
+            "target_id, target_thread_id, mode, tenant_id,rescan_operation,"
+            "(rescan_lease_until>clock_timestamp()) AS rescan_lease_live "
+            "FROM routing WHERE id = %s FOR UPDATE",
             (int(rule_id),),
         )
         rule = cur.fetchone()
         if (rule is None or rule["is_active"] or not owner_token
                 or rule["rescan_owner_token"] != owner_token):
             raise RescanBlocked("Для фиксации изменений необходимо владеть остановленным процессом пересканирования")
-        if expected_scope is not None and expected_scope != (
-            str(rule["source_id"]), rule["source_thread_id"],
-            str(rule["target_id"]), rule["target_thread_id"], rule["mode"],
-        ):
+        if expected_scope is not None and expected_scope != self._rescan_scope(rule):
             raise RescanBlocked("Настройки источника или получателя изменились; повторите пересканирование")
+        operation = rule.get("rescan_operation")
+        if operation is not None and (
+            not rule.get("rescan_lease_live") or operation.get("phase") != "scanning"
+            or tuple(operation["scope"]) != self._rescan_scope(rule)
+            or operation["tenant_id"] != rule["tenant_id"]
+        ):
+            raise RescanBlocked("Операция пересканирования устарела или уже завершена")
+        return rule
+
+    def _lock_rescan_commit(self, cur, rule_id: int, owner_token: str, expected_scope):
+        rule = self._lock_rescan_owner(cur, rule_id, owner_token, expected_scope)
         cur.execute(
             """SELECT EXISTS(SELECT 1 FROM deliveries
                    WHERE rule_id=%s AND status='processing')
@@ -5058,6 +5298,13 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         with self.connect() as conn:
             with conn.cursor() as cur:
                 rule = self._lock_rescan_commit(cur, rule_id, owner_token, expected_scope)
+                operation = rule.get("rescan_operation")
+                if operation is not None and (
+                    operation["mode"] != ("keep" if preserve_sent else "fresh")
+                    or operation["before_message_id"] != before_message_id
+                    or operation["watermark"] != include_newer_than_message_id
+                ):
+                    raise RescanBlocked("Параметры пересканирования изменились")
                 self._assert_rescan_live_snapshot(
                     cur, rule, include_newer_than_message_id,
                     allowed_message_ids, checked_missing_message_ids or set(),
@@ -5218,13 +5465,25 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     cur, rule, include_newer_than_message_id,
                     allowed_message_ids, checked_missing_message_ids or set(),
                 )
+                # This per-operation marker commits atomically with the new
+                # delivery IDs. The historical rescan_queue_built flag cannot
+                # distinguish a previous scan from this one.
+                if operation is not None:
+                    cur.execute(
+                        """UPDATE routing SET rescan_operation=jsonb_set(
+                               rescan_operation,'{phase}','"rebuilt"'::jsonb)
+                           WHERE id=%s AND rescan_owner_token=%s""",
+                        (int(rule_id), owner_token),
+                    )
+                    if cur.rowcount != 1:
+                        raise RescanBlocked("Потерян владелец перестройки")
             conn.commit()
         return archived, old_count, rebuilt, removed_stale, excluded_before
 
     def clear_rule_deliveries(self, rule_id: int) -> int:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT id FROM routing WHERE id=%s AND rescan_owner_token IS NULL FOR UPDATE", (rule_id,))
+                cur.execute("SELECT id FROM routing WHERE id=%s AND rescan_owner_token IS NULL AND rescan_operation IS NULL FOR UPDATE", (rule_id,))
                 if not cur.fetchone():
                     raise RescanBlocked("Правило недоступно или пересканируется")
                 cur.execute("""SELECT 1 FROM telegram_publication_receipts
@@ -5236,6 +5495,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     raise RuntimeError("Есть незавершённая публикация или реакция")
                 cur.execute("DELETE FROM deliveries WHERE rule_id = %s", (rule_id,))
                 count = int(cur.rowcount or 0)
+                cur.execute("UPDATE routing SET rescan_operation=NULL WHERE id=%s", (rule_id,))
             conn.commit()
             return count
 
@@ -5281,15 +5541,18 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                 rule = cur.fetchone()
                 if not rule:
                     return None
-                cur.execute(
-                    """SELECT d.id AS delivery_id,d.status,d.sent_at,
-                              p.id AS post_id,p.message_id,p.source_channel,p.source_thread_id,
-                              p.media_group_id,p.content_json,p.created_at
-                       FROM deliveries d JOIN posts p ON p.id=d.post_id
-                       WHERE d.rule_id=%s ORDER BY p.message_id,p.id""",
-                    (int(rule_id),),
-                )
-                items = self._build_rule_logical_items_from_rows(rule_id, cur.fetchall(), rule["mode"])
+                return self._rule_first_pending_message_id(cur, rule_id, rule["mode"])
+
+    def _rule_first_pending_message_id(self, cur, rule_id: int, mode: str) -> int | None:
+        cur.execute(
+            """SELECT d.id AS delivery_id,d.status,d.sent_at,
+                      p.id AS post_id,p.message_id,p.source_channel,p.source_thread_id,
+                      p.media_group_id,p.content_json,p.created_at
+               FROM deliveries d JOIN posts p ON p.id=d.post_id
+               WHERE d.rule_id=%s ORDER BY p.message_id,p.id""",
+            (int(rule_id),),
+        )
+        items = self._build_rule_logical_items_from_rows(rule_id, cur.fetchall(), mode)
         return next((int(item["first_message_id"]) for item in items if not item["is_done"]), None)
 
 
@@ -9892,7 +10155,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         try:
             with self.connect() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT mode FROM routing WHERE id=%s AND rescan_owner_token IS NULL FOR UPDATE", (rule_id,))
+                    cur.execute("SELECT mode FROM routing WHERE id=%s AND rescan_owner_token IS NULL AND rescan_operation IS NULL FOR UPDATE", (rule_id,))
                     rule = cur.fetchone()
                     if not rule:
                         return None
@@ -9929,7 +10192,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     cur.execute(
                         """
                         UPDATE routing
-                        SET next_run_at = %s
+                        SET next_run_at = %s, rescan_operation=NULL
                         WHERE id = %s
                         """,
                         (now_iso, rule_id),

@@ -21,6 +21,7 @@ from app.worker_load_service import build_worker_load_snapshot
 from app.worker_resource_policy import POLICY
 from app.tenant_fairness_service import TenantFairnessService
 from app.top_time_guard_service import TopTimeGuardService
+from app.runtime_utils import wait_for_db_task
 
 logger = logging.getLogger("forwarder")
 
@@ -87,8 +88,9 @@ def _video_tenant_throttled(repo, fairness_service, tenant_id, system_mode):
     )
 
 
-async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = True) -> dict[str, int]:
-    if not enabled:
+async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = True,
+                         stop_event: asyncio.Event | None = None) -> dict[str, int]:
+    if not enabled or (stop_event is not None and stop_event.is_set()):
         return {"created": 0, "duplicates": 0, "checked_rules": 0}
 
     created = 0
@@ -109,6 +111,8 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
     rules = await asyncio.to_thread(repo.get_all_rules)
 
     for rule in rules:
+        if stop_event is not None and stop_event.is_set():
+            break
         if not bool(getattr(rule, "is_active", False)):
             continue
 
@@ -200,6 +204,8 @@ async def scheduler_tick(repo, *, now_iso: str | None = None, enabled: bool = Tr
                 logger.warning("Scheduler временно ограничил tenant #%s: превышена нагрузка", tenant_id)
                 continue
 
+        if stop_event is not None and stop_event.is_set():
+            break
         job_id: int | None = None
         if hasattr(repo, "take_due_delivery_and_create_job"):
             try:
@@ -292,10 +298,22 @@ async def run_scheduler_loop(
     is_enabled: Callable[[], bool] | None = None,
 ) -> None:
     logger.info("Scheduler loop запущен")
-    while True:
+    stop_event = asyncio.Event()
+    while not stop_event.is_set():
         try:
             enabled = is_enabled() if is_enabled else True
-            await scheduler_tick(repo, enabled=enabled)
+            tick = asyncio.create_task(scheduler_tick(repo, enabled=enabled, stop_event=stop_event))
+            try:
+                await asyncio.shield(tick)
+            except asyncio.CancelledError:
+                # asyncio.to_thread cannot cancel a running SQL transaction.
+                # Stop admitting the next rule and join the current tick before
+                # allowing shutdown to drain the consumers.
+                stop_event.set()
+                await wait_for_db_task(tick)
+                raise
         except Exception as exc:
+            if stop_event.is_set():
+                raise
             logger.warning("Scheduler loop ошибка: %s", exc)
         await asyncio.sleep(max(0.2, float(interval_seconds)))

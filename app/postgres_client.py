@@ -72,6 +72,12 @@ class PostgresClient:
             autocommit=False,
             row_factory=dict_row,
             connect_timeout=5,
+            # Detect a black-holed TCP peer before the systemd stop budget.
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=3,
+            tcp_user_timeout=60000,
         )
 
         try:

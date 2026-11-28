@@ -298,41 +298,80 @@ def test_bot_polling_preserves_session_until_campaign_shutdown():
     assert session_options[0].value is False
 
 
-def test_incomplete_campaign_drain_continues_cleanup_without_closing_telegram_clients():
+@pytest.mark.parametrize("with_publication_flush,stop_workers", [(False, False), (False, True), (True, False), (True, True)])
+def test_shutdown_requests_completion_before_closing_telegram_clients(with_publication_flush, stop_workers):
     import ast
     from pathlib import Path
+    from app.runtime_utils import wait_for_db_task
 
     parsed = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
     fn = next(
         n for n in parsed.body
         if isinstance(n, ast.AsyncFunctionDef) and n.name == "_shutdown_runtime"
     )
+    drain_helper = next(
+        n for n in parsed.body
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_drain_with_publication_flush"
+    )
     events = []
+    flushed = asyncio.Event()
+    campaign_stopped = asyncio.Event()
 
-    async def fail_drain():
+    async def drain_workers(*, wait_until_complete):
+        assert wait_until_complete is True
+        if with_publication_flush:
+            await asyncio.wait_for(flushed.wait(), timeout=2)
+        # Model a job worker stuck in cancellation cleanup. Campaigns must
+        # start their shutdown independently, before this worker can finish.
+        await asyncio.wait_for(campaign_stopped.wait(), timeout=2)
+        assert "telethon_disconnect" not in events
+        assert "bot_session_close" not in events
+        events.append("workers_cleanup")
+
+    async def drain_campaign(*, wait_until_complete):
+        assert wait_until_complete is True
+        if with_publication_flush:
+            await asyncio.wait_for(flushed.wait(), timeout=2)
         events.append("campaign_stop")
-        raise RuntimeError("in-flight Telegram RPC")
+        campaign_stopped.set()
+        assert "telethon_disconnect" not in events
+        assert "bot_session_close" not in events
 
     async def record(name):
         events.append(name)
 
-    campaign = SimpleNamespace(stop=fail_drain)
+    async def flush():
+        events.append("publication_flush")
+        flushed.set()
+        if stop_workers:
+            # The first flush cannot finish until campaigns start stopping.
+            await asyncio.wait_for(campaign_stopped.wait(), timeout=2)
+
+    campaign = SimpleNamespace(stop=drain_campaign)
     raw_telethon = SimpleNamespace(disconnect=lambda: record("telethon_disconnect"))
+    if with_publication_flush:
+        raw_telethon.flush_publication_inbox = flush
     reactor = SimpleNamespace(client=SimpleNamespace(disconnect=lambda: record("reaction_disconnect")), session_name="r")
     raw_bot = SimpleNamespace(session=SimpleNamespace(close=lambda: record("bot_session_close")))
     ctx = {
         "__name__": "test.shutdown",
         "asyncio": asyncio, "logger": logging.getLogger("test.shutdown.drain"),
         "stop_background_tasks": lambda: record("background_cleanup"),
-        "stop_job_workers_runtime": lambda: record("workers_cleanup"),
+        "stop_job_workers_runtime": drain_workers,
         "runtime_ownership": SimpleNamespace(begin_shutdown=lambda: None),
         "stop_all_workers": lambda: record("all_workers_cleanup"),
         "dashboard_tasks": {},
         "channel_title_sync_task": None,
         "repost_campaign_runtime_tasks": campaign,
         "scheduler_runtime_task": None,
+        "rescan_recovery_task": None,
+        "rescan_recovery_stop": None,
+        "rescan_recovery_job": None,
+        "wait_for_db_task": wait_for_db_task,
+        "rule_ui_tasks": {},
         "job_watchdog_task": None,
         "reaction_worker_task": None,
+        "reaction_worker_stop": None,
         "sender_service": SimpleNamespace(video_processor=SimpleNamespace(
             shutdown=lambda: record("processor_cleanup"),
         )),
@@ -341,20 +380,81 @@ def test_incomplete_campaign_drain_continues_cleanup_without_closing_telegram_cl
         "bot": raw_bot,
         "runtime_context": SimpleNamespace(),
     }
-    module = ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[]))
+    module = ast.fix_missing_locations(ast.Module(body=[drain_helper, fn], type_ignores=[]))
     exec(compile(module, "bot.py", "exec"), ctx)
-    result = asyncio.run(ctx["_shutdown_runtime"](
-        stop_workers_runtime=False, close_dashboard_tasks=True,
-        close_telegram_clients=True, close_bot_session=True,
-    ))
-    assert result is False
+    async def scenario():
+        scheduler_entered = asyncio.Event()
+        recovery_entered = asyncio.Event()
+        recovery_stop = asyncio.Event()
+
+        async def scheduler():
+            scheduler_entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                # Model a scheduler tick blocked in cancellation-safe SQL.
+                # Campaigns and the flusher must start before it can finish.
+                await asyncio.wait_for(campaign_stopped.wait(), timeout=2)
+                events.append("scheduler_cleanup")
+
+        async def recovery():
+            recovery_entered.set()
+            await recovery_stop.wait()
+            await asyncio.wait_for(campaign_stopped.wait(), timeout=2)
+            events.append("recovery_cleanup")
+
+        scan_entered = asyncio.Event()
+        scan_cancelled = asyncio.Event()
+
+        async def scan():
+            scan_entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                scan_cancelled.set()
+                await asyncio.wait_for(campaign_stopped.wait(), timeout=2)
+                events.append("scan_cleanup")
+
+        ctx["rescan_recovery_job"] = asyncio.create_task(scan())
+        async def recovery_with_child():
+            await recovery()
+            assert scan_cancelled.is_set()
+            await asyncio.gather(ctx["rescan_recovery_job"], return_exceptions=True)
+
+        ctx["scheduler_runtime_task"] = asyncio.create_task(scheduler())
+        ctx["rescan_recovery_task"] = asyncio.create_task(recovery_with_child())
+        ctx["rescan_recovery_stop"] = recovery_stop
+        await scheduler_entered.wait()
+        await recovery_entered.wait()
+        await scan_entered.wait()
+        return await ctx["_shutdown_runtime"](
+            stop_workers_runtime=stop_workers, close_dashboard_tasks=True,
+            close_telegram_clients=True, close_bot_session=True,
+        )
+
+    result = asyncio.run(scenario())
+    assert result is True
+    for cleanup in ("scheduler_cleanup", "recovery_cleanup", "scan_cleanup"):
+        assert events.index("campaign_stop") < events.index(cleanup)
+        assert events.index(cleanup) < events.index("telethon_disconnect")
+    assert events.count("campaign_stop") == 1
+    if stop_workers:
+        assert events.index("campaign_stop") < events.index("workers_cleanup")
+        assert events.index("workers_cleanup") < events.index("telethon_disconnect")
+        assert events.index("workers_cleanup") < events.index("bot_session_close")
+    if with_publication_flush:
+        assert events.index("publication_flush") < events.index("campaign_stop")
+        assert events.count("publication_flush") >= 2
+        assert max(i for i, event in enumerate(events) if event == "publication_flush") < events.index("telethon_disconnect")
+    else:
+        assert "publication_flush" not in events
     assert "background_cleanup" in events and "processor_cleanup" in events
-    assert "telethon_disconnect" not in events
-    assert "reaction_disconnect" not in events
-    assert "bot_session_close" not in events
-    assert ctx["repost_campaign_runtime_tasks"] is campaign
-    assert ctx["telethon_client"] is raw_telethon
-    assert ctx["bot"] is raw_bot
+    assert events.index("telethon_disconnect") > events.index("campaign_stop")
+    assert "reaction_disconnect" in events
+    assert "bot_session_close" in events
+    assert ctx["repost_campaign_runtime_tasks"] is None
+    assert ctx["telethon_client"] is None
+    assert ctx["bot"] is None
 
 
 def test_main_preserves_original_role_error_when_shutdown_is_incomplete():
@@ -391,3 +491,40 @@ def test_main_preserves_original_role_error_when_shutdown_is_incomplete():
     exec(compile(module, "bot.py", "exec"), ctx)
     with pytest.raises(ValueError, match="original role error"):
         asyncio.run(ctx["main"]("bot"))
+
+
+def test_shutdown_campaign_drain_joins_remaining_cleanup_without_recancelling(monkeypatch):
+    from app import worker_shutdown
+
+    async def scenario():
+        manager = RepostCampaignRuntimeTasks(repo=SimpleNamespace(), bot=SimpleNamespace())
+        cleanup_started = asyncio.Event()
+        cleanup_done = asyncio.Event()
+        release = asyncio.Event()
+
+        async def worker():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleanup_started.set()
+                await release.wait()
+                cleanup_done.set()
+
+        child = asyncio.create_task(worker())
+        manager._tasks.append(child)
+        await asyncio.sleep(0)
+        stop = asyncio.create_task(manager.stop(timeout_sec=0.01, wait_until_complete=True))
+        try:
+            await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+            await asyncio.sleep(0.05)
+            assert not stop.done()
+            assert not child.done()
+            assert child.cancelling() == 1
+        finally:
+            release.set()
+            await asyncio.wait_for(stop, timeout=1)
+        assert cleanup_done.is_set()
+        assert not manager.is_running()
+
+    monkeypatch.setattr(worker_shutdown, "_CANCEL_SETTLE_TIMEOUT_SEC", 0.01)
+    asyncio.run(scenario())

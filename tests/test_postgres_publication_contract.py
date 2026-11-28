@@ -448,13 +448,32 @@ def test_rescan_legacy_video_history_431_and_atomic_rebuild(repo, monkeypatch):
                 (rule_id,target,target,deliveries+list(range(9000001,9000429)),
                  source_ids+list(range(1,429)),[649,650,651]+list(range(1,429))),
             )
+    # Inject the error only inside the rebuild transaction. Release now
+    # writes a durable audit receipt using utc_now_iso as well; a global
+    # patch would also break that separate transaction and strand the owner.
+    restart = repo.restart_rule_queue
+
+    def fail():
+        raise RuntimeError("rebuild failed")
+
+    def fail_rebuild(*args, **kwargs):
+        with monkeypatch.context() as rebuild_patch:
+            rebuild_patch.setattr("app.postgres_repository.utc_now_iso", fail)
+            return restart(*args, **kwargs)
+
     with monkeypatch.context() as patch:
-        def fail():
-            raise RuntimeError("rebuild failed")
-        patch.setattr("app.postgres_repository.utc_now_iso", fail)
+        patch.setattr(repo, "restart_rule_queue", fail_rebuild)
         with pytest.raises(RuntimeError, match="rebuild failed"):
             _restart_from_snapshot(repo, rule_id)
     assert all(repo.get_delivery(d)["status"]=="sent" for d in deliveries)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT rescan_owner_token,is_active FROM routing WHERE id=%s", (rule_id,))
+            row = cur.fetchone()
+            assert row["rescan_owner_token"] is None and row["is_active"]
+            cur.execute("SELECT COUNT(*) AS n FROM delivery_attempts WHERE rule_id=%s AND idempotency_key LIKE %s",
+                        (rule_id, "%:rescan:%"))
+            assert cur.fetchone()["n"] == 0
     archived, deleted, rebuilt = _restart_from_snapshot(repo, rule_id)
     assert (archived, deleted, rebuilt)==(431,3,3)
     with repo.connect() as conn:
@@ -2274,3 +2293,348 @@ def test_atomic_job_usage_denies_inactive_subscription(repo):
         with conn.cursor() as cur:
             cur.execute("SELECT status FROM deliveries WHERE rule_id=%s", (rule_id,))
             assert cur.fetchone()["status"] == "pending"
+
+
+def _expire_rescan_lease(repo, rule_id):
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET rescan_lease_until=clock_timestamp()-INTERVAL '1 second' WHERE id=%s",
+                        (rule_id,))
+
+
+@pytest.mark.parametrize("fresh,initially_active", [(True, True), (False, False)])
+def test_durable_rescan_recovery_fences_old_owner_and_committed_phase(repo, fresh, initially_active):
+    from app.rescan_safety import RescanBlocked
+
+    _, rule_id, delivery_ids, source_ids, source, target = seed(repo, uuid4().int % 10**10)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=%s WHERE id=%s", (initially_active, rule_id))
+    was_active, old = repo.begin_rule_rescan(rule_id, fresh=fresh, actor_id=1,
+                                            expected_scope=(source, None, target, None, "repost"))
+    assert was_active is initially_active
+    op = repo.get_rule_rescan_operation(rule_id, old)
+    assert op["phase"] == "scanning" and op["was_active"] is initially_active
+    assert repo.claim_interrupted_rule_rescan(rule_id) is None
+    assert repo.renew_rule_rescan(rule_id, old)
+    _expire_rescan_lease(repo, rule_id)
+    assert rule_id in repo.list_expired_rule_rescans(limit=100)
+
+    def claim(_):
+        try:
+            return repo.claim_interrupted_rule_rescan(rule_id)
+        finally:
+            repo.client.close_thread_connection()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claims = list(pool.map(claim, range(2)))
+    assert sum(c is not None for c in claims) == 1
+    token, recovered = next(c for c in claims if c is not None)
+    assert token != old and recovered["attempt"] == 2
+    assert recovered["watermark"] == op["watermark"]
+    assert recovered["before_message_id"] == op["before_message_id"]
+    assert not repo.renew_rule_rescan(rule_id, old)
+    with pytest.raises(RescanBlocked):
+        repo.save_post_batch([(source_ids[0], source, None, {"text": "stale"}, None)],
+                             preserve_existing_deliveries=True, rescan_owner=(rule_id, old))
+    kwargs = dict(allowed_message_ids=set(source_ids),
+                  include_newer_than_message_id=op["watermark"],
+                  expected_scope=(source, None, target, None, "repost"))
+    with pytest.raises(RescanBlocked):
+        if fresh:
+            repo.restart_rule_queue(rule_id, owner_token=old, **kwargs)
+        else:
+            repo.rebuild_rule_keep_position(rule_id, owner_token=old,
+                                            before_message_id=op["before_message_id"], **kwargs)
+    with pytest.raises(RuntimeError):
+        repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=old)
+    if fresh:
+        repo.restart_rule_queue(rule_id, owner_token=token, **kwargs)
+    else:
+        repo.rebuild_rule_keep_position(rule_id, owner_token=token,
+                                       before_message_id=op["before_message_id"], **kwargs)
+    assert repo.get_rule_rescan_operation(rule_id, token)["phase"] == "rebuilt"
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM deliveries WHERE rule_id=%s ORDER BY id", (rule_id,))
+            rebuilt_ids = [row["id"] for row in cur.fetchall()]
+    _expire_rescan_lease(repo, rule_id)
+    final_token, completed = repo.claim_interrupted_rule_rescan(rule_id)
+    assert completed["phase"] == "rebuilt"
+    with pytest.raises(RescanBlocked):
+        if fresh:
+            repo.restart_rule_queue(rule_id, owner_token=final_token, **kwargs)
+        else:
+            repo.rebuild_rule_keep_position(rule_id, owner_token=final_token,
+                                            before_message_id=op["before_message_id"], **kwargs)
+    assert repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=final_token,
+                                   queue_rebuilt=True) is initially_active
+    # Retrying a lost commit reply must neither lose nor duplicate the durable audit.
+    assert repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=final_token,
+                                   queue_rebuilt=True) is initially_active
+    audits = [row for row in repo.get_audit_for_rule(rule_id)
+              if row["event_type"] == "rule_rescan_recovered"]
+    assert len(audits) == 1
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM deliveries WHERE rule_id=%s ORDER BY id", (rule_id,))
+            assert [row["id"] for row in cur.fetchall()] == rebuilt_ids
+            cur.execute("SELECT is_active,rescan_owner_token,rescan_operation FROM routing WHERE id=%s", (rule_id,))
+            row = cur.fetchone()
+            assert row["is_active"] is initially_active
+            assert row["rescan_owner_token"] is None and row["rescan_operation"] is None
+
+
+def test_legacy_rescan_is_not_auto_replayed_and_existing_button_can_replace_owner(repo):
+    _, rule_id, _, _, source, target = seed(repo, uuid4().int % 10**10)
+    from app.rescan_safety import RescanBlocked
+
+    # A low-level call in the current binary is still a real owner.
+    _, local = repo.begin_rule_rescan(rule_id, fresh=True)
+    with pytest.raises(RescanBlocked, match="уже выполняется"):
+        repo.begin_rule_rescan(rule_id, actor_id=1)
+    # Simulate the persisted token left by an old, fully stopped binary.
+    legacy = uuid4().hex
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET rescan_owner_token=%s WHERE id=%s AND rescan_owner_token=%s",
+                        (legacy, rule_id, local))
+            assert cur.rowcount == 1
+    assert repo.claim_interrupted_rule_rescan(rule_id) is None
+    assert rule_id not in repo.list_expired_rule_rescans(limit=100)
+    assert repo.issue_rule_rescan_confirmation(rule_id, 1, "legacy-confirm")
+    assert repo.consume_rule_rescan_confirmation(rule_id, 1, "legacy-confirm")
+    active, token = repo.begin_rule_rescan(rule_id, fresh=True, actor_id=1,
+                                         expected_scope=(source, None, target, None, "repost"))
+    assert active is False and token != legacy
+    assert repo.get_rule_rescan_operation(rule_id, token)["mode"] == "fresh"
+    repo.finish_rule_rescan(rule_id, was_active=False, owner_token=token)
+
+
+def test_durable_rescan_serializes_schedule_and_rejects_pre_lock_confirmation(repo):
+    _, rule_id, _, _, source, target = seed(repo, uuid4().int % 10**10)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET next_run_at=%s WHERE id=%s",
+                        ("2026-11-29T13:00:00+00:00", rule_id))
+    assert repo.issue_rule_rescan_confirmation(rule_id, 1, "before-lock")
+    _, local = repo.begin_rule_rescan(rule_id)
+    assert not repo.consume_rule_rescan_confirmation(rule_id, 1, "before-lock")
+    # Simulate a lock left by the previous binary, not a live local owner.
+    legacy = uuid4().hex
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET rescan_owner_token=%s WHERE id=%s AND rescan_owner_token=%s",
+                        (legacy, rule_id, local))
+            assert cur.rowcount == 1
+    _, owner = repo.begin_rule_rescan(rule_id, actor_id=1,
+                                      expected_scope=(source, None, target, None, "repost"))
+    assert owner != legacy
+    assert repo.get_rule_rescan_operation(rule_id, owner)["old_next_run_at"] == "2026-11-29T13:00:00+00:00"
+    assert repo.finish_rule_rescan(rule_id, was_active=False, owner_token=owner) is False
+
+
+def test_recovered_rescan_release_retry_preserves_scope_changed_pause(repo):
+    _, rule_id, _, source_ids, source, target = seed(repo, uuid4().int % 10**10)
+    scope = (source, None, target, None, "repost")
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET is_active=TRUE WHERE id=%s", (rule_id,))
+    active, token = repo.begin_rule_rescan(rule_id, fresh=True, actor_id=1,
+                                          expected_scope=scope)
+    assert active
+    op = repo.get_rule_rescan_operation(rule_id, token)
+    repo.restart_rule_queue(rule_id, owner_token=token, allowed_message_ids=set(source_ids),
+                            include_newer_than_message_id=op["watermark"], expected_scope=scope)
+    _expire_rescan_lease(repo, rule_id)
+    owner, _ = repo.claim_interrupted_rule_rescan(rule_id)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE routing SET target_thread_id=42 WHERE id=%s", (rule_id,))
+    assert repo.finish_rule_rescan(rule_id, was_active=True, owner_token=owner,
+                                   queue_rebuilt=True) is False
+    assert repo.finish_rule_rescan(rule_id, was_active=True, owner_token=owner,
+                                   queue_rebuilt=True) is False
+    audits = [row for row in repo.get_audit_for_rule(rule_id)
+              if row["event_type"] == "rule_rescan_recovered"]
+    assert len(audits) == 1
+
+
+def test_interrupted_keep_scan_does_not_move_manual_retry_cursor(repo):
+    key, rule_id, _, source_ids, source, target = seed(repo, uuid4().int % 10**10)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
+            cur.execute(
+                """INSERT INTO routing(source_id,target_id,created_date,tenant_id)
+                   VALUES (%s,%s,%s,1) RETURNING id""",
+                (source, target + "1", "2026-01-01T00:00:00+00:00"),
+            )
+            other_rule_id = cur.fetchone()["id"]
+    scope = (source, None, target, None, "repost")
+    _, token = repo.begin_rule_rescan(rule_id, actor_id=1, expected_scope=scope)
+    original = repo.get_rule_rescan_operation(rule_id, token)
+    assert original["before_message_id"] == source_ids[0]
+    older = source_ids[0] - 1
+    repo.save_post_batch([(older, source, None, {"media_kind": "text"}, None)],
+                         preserve_existing_deliveries=True, rescan_owner=(rule_id, token))
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT d.rule_id FROM deliveries d JOIN posts p ON p.id=d.post_id
+                           WHERE p.source_channel=%s AND p.message_id=%s""", (source, older))
+            assert {row["rule_id"] for row in cur.fetchall()} == {other_rule_id}
+    for _ in range(3):
+        _expire_rescan_lease(repo, rule_id)
+        token, operation = repo.claim_interrupted_rule_rescan(rule_id)
+    assert operation["attempt"] == 4
+    assert repo.finish_rule_rescan(rule_id, was_active=False, owner_token=token) is False
+    _, retry = repo.begin_rule_rescan(rule_id, actor_id=1, expected_scope=scope)
+    assert repo.get_rule_rescan_operation(rule_id, retry)["before_message_id"] == source_ids[0]
+
+
+def test_other_rule_history_does_not_rewind_failed_keep_retry(repo):
+    key, rule_id, _, source_ids, source, target = seed(repo, uuid4().int % 10**10)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
+            cur.execute(
+                "INSERT INTO routing(source_id,target_id,created_date,tenant_id) "
+                "VALUES (%s,%s,%s,1) RETURNING id",
+                (source, target + "1", "2026-01-01T00:00:00+00:00"),
+            )
+            other = cur.fetchone()["id"]
+    scope = (source, None, target, None, "repost")
+    _, token = repo.begin_rule_rescan(rule_id, actor_id=1, expected_scope=scope)
+    _, other_token = repo.begin_rule_rescan(other, actor_id=1, fresh=True)
+    older = source_ids[0] - 1
+    repo.save_post_batch([(older, source, None, {"media_kind": "text"}, None)],
+                         preserve_existing_deliveries=True, rescan_owner=(other, other_token))
+    assert repo.get_rule_first_pending_message_id(rule_id) == older
+    for _ in range(3):
+        _expire_rescan_lease(repo, rule_id)
+        token, _ = repo.claim_interrupted_rule_rescan(rule_id, phase="scanning")
+    assert repo.finish_rule_rescan(rule_id, was_active=False, owner_token=token) is False
+    assert rule_id not in repo.list_expired_rule_rescans(limit=100)
+    assert repo.claim_interrupted_rule_rescan(rule_id) is None
+    _, retry = repo.begin_rule_rescan(rule_id, actor_id=1, expected_scope=scope)
+    assert repo.get_rule_rescan_operation(rule_id, retry)["before_message_id"] == source_ids[0]
+    # Explicit fresh discards the saved keep cursor.
+    repo.finish_rule_rescan(rule_id, was_active=False, owner_token=retry)
+    _, fresh = repo.begin_rule_rescan(rule_id, actor_id=1, fresh=True, expected_scope=scope)
+    assert repo.get_rule_rescan_operation(rule_id, fresh)["before_message_id"] is None
+
+
+def test_exact_release_receipt_survives_new_owner_and_rejects_revoked_token(repo):
+    _, rule_id, _, _, _, _ = seed(repo, uuid4().int % 10**10)
+    _, first = repo.begin_rule_rescan(rule_id, actor_id=1)
+    assert repo.finish_rule_rescan(rule_id, was_active=False, owner_token=first) is False
+    _, second = repo.begin_rule_rescan(rule_id, actor_id=1)
+    assert repo.finish_rule_rescan(rule_id, was_active=False, owner_token=first) is False
+    assert repo.get_rule_rescan_operation(rule_id, second)["phase"] == "scanning"
+    _expire_rescan_lease(repo, rule_id)
+    assert repo.claim_interrupted_rule_rescan(rule_id, phase="rebuilt") is None
+    third, _ = repo.claim_interrupted_rule_rescan(rule_id, phase="scanning")
+    assert repo.finish_rule_rescan(rule_id, was_active=False, owner_token=third) is False
+    with pytest.raises(RuntimeError, match="Владелец"):
+        repo.finish_rule_rescan(rule_id, was_active=False, owner_token=second)
+
+
+@pytest.mark.parametrize("fresh", [False, True])
+def test_failed_rescan_requires_verified_rebuild_before_activation(repo, fresh):
+    key, rule_id, _, source_ids, source, target = seed(repo, uuid4().int % 10**10)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
+            cur.execute("UPDATE routing SET rescan_queue_built=TRUE,is_active=TRUE WHERE id=%s", (rule_id,))
+    scope = (source, None, target, None, "repost")
+    _, token = repo.begin_rule_rescan(rule_id, fresh=fresh, actor_id=1, expected_scope=scope)
+    old, new = source_ids[0] - 1, source_ids[0] + 1
+    repo.save_post_batch(
+        [(old, source, None, {"media_kind": "text"}, None),
+         (new, source, None, {"media_kind": "text"}, None)],
+        preserve_existing_deliveries=True, rescan_owner=(rule_id, token),
+    )
+    for _ in range(3):
+        _expire_rescan_lease(repo, rule_id)
+        token, _ = repo.claim_interrupted_rule_rescan(rule_id, phase="scanning")
+    assert repo.finish_rule_rescan(rule_id, was_active=False, owner_token=token) is False
+    assert not repo.set_rule_active(rule_id, True)
+    assert not repo.activate_rule_with_backfill(rule_id)
+    from app.rescan_safety import RescanBlocked
+    with pytest.raises(RescanBlocked, match="существующее меню"):
+        repo.begin_rule_rescan(rule_id)
+    assert repo.update_rule_mode(rule_id, "video")
+    assert repo.update_rule_mode(rule_id, "repost")
+    assert not repo.activate_rule_with_backfill(rule_id)
+    assert rule_id not in repo.list_expired_rule_rescans(limit=100)
+
+    # Existing keep action reads Telegram again. The older cached message
+    # is absent from Telegram and must never be resurrected by activation.
+    was_active, token = repo.begin_rule_rescan(rule_id, actor_id=1, expected_scope=scope)
+    op = repo.get_rule_rescan_operation(rule_id, token)
+    assert was_active is False
+    repo.rebuild_rule_keep_position(
+        rule_id, owner_token=token, before_message_id=op["before_message_id"],
+        allowed_message_ids={*source_ids, new},
+        include_newer_than_message_id=op["watermark"], expected_scope=scope,
+    )
+    assert repo.finish_rule_rescan(rule_id, was_active=False, owner_token=token, queue_rebuilt=True) is False
+    assert repo.activate_rule_with_backfill(rule_id)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT p.message_id FROM deliveries d JOIN posts p ON p.id=d.post_id
+                           WHERE d.rule_id=%s AND d.status='pending'""", (rule_id,))
+            assert {row["message_id"] for row in cur.fetchall()} == {*source_ids, new}
+
+
+def test_recovery_claim_skips_locked_route(repo):
+    _, rule_id, _, _, _, _ = seed(repo, uuid4().int % 10**10)
+    _, token = repo.begin_rule_rescan(rule_id, actor_id=1)
+    _expire_rescan_lease(repo, rule_id)
+
+    def claim():
+        try:
+            return repo.claim_interrupted_rule_rescan(rule_id, phase="scanning")
+        finally:
+            repo.client.close_thread_connection()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM routing WHERE id=%s FOR UPDATE", (rule_id,))
+                # A blocked route must not stall the supervisor.
+                assert pool.submit(claim).result(timeout=3) is None
+        claimed = pool.submit(claim).result(timeout=3)
+    assert claimed is not None and claimed[0] != token
+
+
+def test_expired_rescan_selection_skips_locked_first_route(repo):
+    _, first, _, _, _, _ = seed(repo, uuid4().int % 10**10)
+    _, second, _, _, _, _ = seed(repo, uuid4().int % 10**10)
+    repo.begin_rule_rescan(first, actor_id=1)
+    repo.begin_rule_rescan(second, actor_id=1)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            # Put these two ahead of any expired fixtures from earlier tests.
+            cur.execute("UPDATE routing SET rescan_lease_until='2000-01-01' WHERE id=%s", (first,))
+            cur.execute("UPDATE routing SET rescan_lease_until='2000-01-02' WHERE id=%s", (second,))
+    assert repo.list_expired_rule_rescans(1, phase="scanning") == [first]
+
+    def select_and_claim():
+        try:
+            ids = repo.list_expired_rule_rescans(1, phase="scanning")
+            return ids, repo.claim_interrupted_rule_rescan(ids[0], phase="scanning")
+        finally:
+            repo.client.close_thread_connection()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with repo.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM routing WHERE id=%s FOR UPDATE", (first,))
+                ids, claimed = pool.submit(select_and_claim).result(timeout=3)
+                assert ids == [second]
+                assert claimed is not None
+        assert repo.list_expired_rule_rescans(1, phase="scanning") == [first]

@@ -103,7 +103,7 @@ def test_production_service_timeout_exceeds_worker_grace():
 
 def test_no_instant_cancel_during_bot_shutdown():
     source = Path("bot.py").read_text(encoding="utf-8")
-    start = source.index("async def stop_job_workers_runtime()")
+    start = source.index("async def stop_job_workers_runtime(")
     end = source.index("def _register_user_saas_handlers", start)
     body = source[start:end]
     assert "await job_workers.stop(" in body
@@ -123,7 +123,7 @@ def test_all_role_keeps_bot_session_open_until_after_worker_drain():
     shutdown_start = source.index("async def _shutdown_runtime(")
     shutdown_end = source.index("async def _run_scheduler_role_loop()", shutdown_start)
     shutdown = source[shutdown_start:shutdown_end]
-    assert shutdown.index("await stop_job_workers_runtime()") < shutdown.index("await bot.session.close()")
+    assert shutdown.index("await stop_job_workers_runtime(wait_until_complete=True)") < shutdown.index("await bot.session.close()")
 
 
 
@@ -134,7 +134,7 @@ def test_shutdown_drains_publication_before_cancelling_retries():
         source.index("async def _shutdown_runtime("):
         source.index("async def _run_scheduler_role_loop()")
     ]
-    assert shutdown.index("await asyncio.wait_for(flush_publication()") < shutdown.index("await stop_background_tasks()")
+    assert shutdown.index("await flush_publication()") < shutdown.index("await stop_background_tasks()")
     assert shutdown.rindex("publication_evidence_unpersisted") > shutdown.index("await stop_background_tasks()")
     assert shutdown.rindex("publication_evidence_unpersisted") < shutdown.index("await raw_telethon.disconnect()")
 
@@ -210,3 +210,233 @@ def test_outer_drain_deadline_keeps_worker_visible_during_blocked_thread_cleanup
         assert parent.cancelled() and task.done()
 
     asyncio.run(scenario())
+
+
+def test_shutdown_stops_scheduler_and_rescan_before_draining_workers():
+    source = Path("bot.py").read_text(encoding="utf-8")
+    shutdown = source[source.index("async def _shutdown_runtime("):
+                      source.index("async def _run_scheduler_role_loop()")]
+    assert shutdown.index("await asyncio.gather(scheduler_runtime_task") < shutdown.index("await stop_job_workers_runtime(wait_until_complete=True)")
+    assert shutdown.index("await asyncio.gather(rescan_recovery_task") < shutdown.index("await stop_job_workers_runtime(wait_until_complete=True)")
+    assert shutdown.index("await stop_job_workers_runtime(wait_until_complete=True)") < shutdown.index("await raw_telethon.disconnect()")
+
+
+def test_shutdown_job_lifecycle_joins_pending_cleanup_without_recancelling(monkeypatch):
+    from app import worker_shutdown
+    from app.job_worker_lifecycle import JobWorkerLifecycle
+    from app.runtime_roles import RuntimeOwnership
+
+    async def scenario():
+        owner = RuntimeOwnership()
+        owner.bind("all")
+        lifecycle = JobWorkerLifecycle(owner, logging.getLogger("test.shutdown"))
+        cleaning, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def worker(stop):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaning.set()
+                await release.wait()
+                finished.set()
+
+        lifecycle.ensure_running({"light": worker})
+        await asyncio.sleep(0)
+        owner.begin_shutdown()
+        stop = asyncio.create_task(lifecycle.stop(timeout_sec=0.01, wait_until_complete=True))
+        try:
+            await asyncio.wait_for(cleaning.wait(), timeout=1)
+            await asyncio.sleep(0.05)
+            assert not stop.done() and lifecycle.live_count == 1
+        finally:
+            release.set()
+            await asyncio.wait_for(stop, timeout=1)
+        assert finished.is_set() and lifecycle.live_count == 0
+
+    monkeypatch.setattr(worker_shutdown, "_CANCEL_SETTLE_TIMEOUT_SEC", 0.01)
+    asyncio.run(scenario())
+
+
+def test_publication_flush_runs_before_stalled_drain_finishes():
+    import ast
+    from types import SimpleNamespace
+    from app.runtime_utils import wait_for_db_task
+
+    source = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    fn = next(n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
+              and n.name == "_drain_with_publication_flush")
+
+    async def scenario():
+        drained = asyncio.Event()
+        flushed = asyncio.Event()
+
+        async def flush():
+            flushed.set()
+
+        async def drain():
+            await flushed.wait()
+            assert not drained.is_set()
+            drained.set()
+
+        ns = {"asyncio": asyncio, "logger": logging.getLogger(__name__),
+              "telethon_client": SimpleNamespace(flush_publication_inbox=flush),
+              "wait_for_db_task": wait_for_db_task}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), "bot.py", "exec"), ns)
+        await asyncio.wait_for(ns["_drain_with_publication_flush"](drain), timeout=1)
+        assert flushed.is_set() and drained.is_set()
+        assert not any(t.get_name() == "publication-drain-flush" for t in asyncio.all_tasks())
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_flusher_never_starts_optional_durable_replay():
+    import ast
+    from types import SimpleNamespace
+    from app.runtime_utils import wait_for_db_task
+
+    source = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    fn = next(n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
+              and n.name == "_drain_with_publication_flush")
+
+    async def scenario():
+        persisted = asyncio.Event()
+        write_settled = asyncio.Event()
+        drained = asyncio.Event()
+
+        async def persist():
+            persisted.set()
+            await write_settled.wait()
+
+        async def replay():
+            raise AssertionError("Shutdown must not start optional journal replay")
+
+        async def drain():
+            await persisted.wait()
+            drained.set()
+
+        raw = SimpleNamespace(persist_publication_evidence=persist, flush_publication_inbox=replay)
+        ns = {"asyncio": asyncio, "logger": logging.getLogger(__name__),
+              "telethon_client": raw, "wait_for_db_task": wait_for_db_task}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), "bot.py", "exec"), ns)
+        task = asyncio.create_task(ns["_drain_with_publication_flush"](drain))
+        await asyncio.wait_for(drained.wait(), timeout=1)
+        assert not task.done()
+        write_settled.set()
+        await asyncio.wait_for(task, timeout=1)
+
+    asyncio.run(scenario())
+
+
+def test_reaction_shutdown_stops_admission_and_joins_current_job(monkeypatch):
+    from app.reaction_worker import ReactionWorker
+
+    async def scenario():
+        stop, entered, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        worker = ReactionWorker(db=object(), worker_id="test")
+        calls = 0
+
+        async def process_once():
+            nonlocal calls
+            calls += 1
+            entered.set()
+            await release.wait()
+            return True
+
+        monkeypatch.setattr(worker, "process_once", process_once)
+        task = asyncio.create_task(worker.run_forever(stop_event=stop))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            stop.set()
+            await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            release.set()
+            await asyncio.wait_for(task, timeout=1)
+        assert calls == 1
+
+    asyncio.run(scenario())
+
+    source = Path("bot.py").read_text(encoding="utf-8")
+    shutdown = source[source.index("async def _shutdown_runtime("):
+                      source.index("async def _run_scheduler_role_loop()")]
+    assert shutdown.index("reaction_worker_stop.set()") < shutdown.index("await _drain_with_publication_flush(drain_consumers)")
+    assert "drain_campaigns(), drain_reactions()" in shutdown
+    assert "await asyncio.gather(reaction_worker_task" in shutdown
+
+
+def test_shutdown_persists_late_evidence_before_propagating_failed_drain():
+    import ast
+    from types import SimpleNamespace
+
+    import pytest
+
+    from app.runtime_utils import wait_for_db_task
+
+    source = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    names = {"_shutdown_runtime", "_drain_with_publication_flush"}
+    module = ast.Module(
+        body=[n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
+              and n.name in names],
+        type_ignores=[],
+    )
+
+    async def scenario(failed_runtime):
+        first_flush = asyncio.Event()
+        saved = asyncio.Event()
+        events = []
+        failure = RuntimeError("drain failed")
+
+        async def persist():
+            if raw.publication_evidence_unpersisted:
+                raw.publication_evidence_unpersisted = False
+                saved.set()
+            first_flush.set()
+
+        async def drain(name, *, wait_until_complete):
+            assert wait_until_complete
+            if name == failed_runtime:
+                await asyncio.wait_for(first_flush.wait(), timeout=1)
+                # Evidence arrives after the periodic flush and before the
+                # drain raises. It must survive the final error path.
+                raw.publication_evidence_unpersisted = True
+                raise failure
+            events.append(name)
+
+        async def unexpected_close():
+            pytest.fail("shared resources closed after a failed drain")
+
+        raw = SimpleNamespace(
+            publication_evidence_unpersisted=False,
+            persist_publication_evidence=persist,
+            disconnect=unexpected_close,
+        )
+        ns = {
+            "asyncio": asyncio, "logger": logging.getLogger(__name__),
+            "runtime_ownership": SimpleNamespace(begin_shutdown=lambda: None),
+            "scheduler_runtime_task": None, "rescan_recovery_task": None,
+            "rescan_recovery_stop": None, "rescan_recovery_job": None,
+            "reaction_worker_task": None, "reaction_worker_stop": None,
+            "rule_ui_tasks": {}, "dashboard_tasks": {},
+            "channel_title_sync_task": None, "job_watchdog_task": None,
+            "wait_for_db_task": wait_for_db_task,
+            "telethon_client": raw, "reaction_clients": [],
+            "sender_service": None, "runtime_context": None,
+            "bot": SimpleNamespace(session=SimpleNamespace(close=unexpected_close)),
+            "stop_background_tasks": unexpected_close,
+            "stop_job_workers_runtime": lambda **kwargs: drain("worker", **kwargs),
+            "repost_campaign_runtime_tasks": SimpleNamespace(
+                stop=lambda **kwargs: drain("campaign", **kwargs),
+            ),
+        }
+        exec(compile(module, "bot.py", "exec"), ns)
+        with pytest.raises(RuntimeError) as exc_info:
+            await asyncio.wait_for(ns["_shutdown_runtime"](
+                stop_workers_runtime=True, close_dashboard_tasks=True,
+                close_telegram_clients=True, close_bot_session=True,
+            ), timeout=2)
+        assert exc_info.value is failure
+        assert saved.is_set() and not raw.publication_evidence_unpersisted
+        assert events == ["campaign" if failed_runtime == "worker" else "worker"]
+
+    for failed_runtime in ("worker", "campaign"):
+        asyncio.run(scenario(failed_runtime))
