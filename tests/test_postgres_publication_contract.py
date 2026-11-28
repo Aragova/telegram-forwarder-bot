@@ -2322,7 +2322,11 @@ def test_durable_rescan_recovery_fences_old_owner_and_committed_phase(repo, fres
                   include_newer_than_message_id=op["watermark"],
                   expected_scope=(source, None, target, None, "repost"))
     with pytest.raises(RescanBlocked):
-        repo.restart_rule_queue(rule_id, owner_token=old, **kwargs)
+        if fresh:
+            repo.restart_rule_queue(rule_id, owner_token=old, **kwargs)
+        else:
+            repo.rebuild_rule_keep_position(rule_id, owner_token=old,
+                                            before_message_id=op["before_message_id"], **kwargs)
     with pytest.raises(RuntimeError):
         repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=old)
     if fresh:
@@ -2339,7 +2343,11 @@ def test_durable_rescan_recovery_fences_old_owner_and_committed_phase(repo, fres
     final_token, completed = repo.claim_interrupted_rule_rescan(rule_id)
     assert completed["phase"] == "rebuilt"
     with pytest.raises(RescanBlocked):
-        repo.restart_rule_queue(rule_id, owner_token=final_token, **kwargs)
+        if fresh:
+            repo.restart_rule_queue(rule_id, owner_token=final_token, **kwargs)
+        else:
+            repo.rebuild_rule_keep_position(rule_id, owner_token=final_token,
+                                            before_message_id=op["before_message_id"], **kwargs)
     assert repo.finish_rule_rescan(rule_id, was_active=was_active, owner_token=final_token,
                                    queue_rebuilt=True) is initially_active
     # Retrying a lost commit reply must neither lose nor duplicate the durable audit.
@@ -2412,3 +2420,36 @@ def test_recovered_rescan_release_retry_preserves_scope_changed_pause(repo):
     audits = [row for row in repo.get_audit_for_rule(rule_id)
               if row["event_type"] == "rule_rescan_recovered"]
     assert len(audits) == 1
+
+
+def test_interrupted_keep_scan_does_not_move_manual_retry_cursor(repo):
+    key, rule_id, _, source_ids, source, target = seed(repo, uuid4().int % 10**10)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM delivery_attempts WHERE idempotency_key=%s", (key,))
+            cur.execute("UPDATE deliveries SET status='pending' WHERE rule_id=%s", (rule_id,))
+            cur.execute(
+                """INSERT INTO routing(source_id,target_id,created_date,tenant_id)
+                   VALUES (%s,%s,%s,1) RETURNING id""",
+                (source, target + "1", "2026-01-01T00:00:00+00:00"),
+            )
+            other_rule_id = cur.fetchone()["id"]
+    scope = (source, None, target, None, "repost")
+    _, token = repo.begin_rule_rescan(rule_id, actor_id=1, expected_scope=scope)
+    original = repo.get_rule_rescan_operation(rule_id, token)
+    assert original["before_message_id"] == source_ids[0]
+    older = source_ids[0] - 1
+    repo.save_post_batch([(older, source, None, {"media_kind": "text"}, None)],
+                         preserve_existing_deliveries=True, rescan_owner=(rule_id, token))
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT d.rule_id FROM deliveries d JOIN posts p ON p.id=d.post_id
+                           WHERE p.source_channel=%s AND p.message_id=%s""", (source, older))
+            assert {row["rule_id"] for row in cur.fetchall()} == {other_rule_id}
+    for _ in range(3):
+        _expire_rescan_lease(repo, rule_id)
+        token, operation = repo.claim_interrupted_rule_rescan(rule_id)
+    assert operation["attempt"] == 4
+    assert repo.finish_rule_rescan(rule_id, was_active=False, owner_token=token) is False
+    _, retry = repo.begin_rule_rescan(rule_id, actor_id=1, expected_scope=scope)
+    assert repo.get_rule_rescan_operation(rule_id, retry)["before_message_id"] == source_ids[0]
