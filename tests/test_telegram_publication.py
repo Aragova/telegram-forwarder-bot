@@ -1340,3 +1340,44 @@ def test_shutdown_persists_only_volatile_evidence_while_journal_replay_is_blocke
             await asyncio.gather(*tasks, return_exceptions=True)
 
     asyncio.run(scenario())
+
+
+def test_sessionless_shutdown_persists_buffered_mapping_after_database_failure(monkeypatch):
+    from telethon import types
+    from app.telegram_publication import prepare_publication_inbox
+    from app import background_tasks
+
+    async def scenario():
+        saved = []
+        available = False
+
+        def record(account, peer, pairs):
+            if not available:
+                raise RuntimeError("temporary database outage")
+            saved.extend(pairs)
+
+        client = SimpleNamespace()
+        client.add_event_handler = lambda callback, event: setattr(client, "handler", callback)
+        async def get_me():
+            return SimpleNamespace(id=7)
+        client.get_me = get_me
+        repo = SimpleNamespace(record_telegram_publication_mappings=record)
+        await prepare_publication_inbox(client, repo)()
+
+        # Prevent the normal retry chain from masking a shutdown regression.
+        def no_retry(coro, *, name):
+            coro.close()
+            return None
+
+        monkeypatch.setattr(background_tasks, "start_background_task", no_retry)
+        await client.handler(types.UpdateDeleteScheduledMessages(
+            peer=types.PeerChannel(99), messages=[4], sent_messages=[100],
+        ))
+        assert not saved
+        assert client.publication_evidence_unpersisted
+        available = True
+        await client.persist_publication_evidence()
+        assert saved == [(4, 100)]
+        assert not client.publication_evidence_unpersisted
+
+    asyncio.run(scenario())
