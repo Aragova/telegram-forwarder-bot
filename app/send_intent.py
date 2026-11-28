@@ -14,7 +14,10 @@ from aiogram.exceptions import (
     TelegramBadRequest, TelegramForbiddenError, TelegramEntityTooLarge, TelegramRetryAfter,
 )
 from telethon import functions, types, utils
-from telethon.errors import BadRequestError, ForbiddenError, FloodWaitError, SlowModeWaitError, RandomIdDuplicateError
+from telethon.errors import (
+    BadRequestError, DocumentInvalidError, ForbiddenError, FloodWaitError,
+    SlowModeWaitError, RandomIdDuplicateError,
+)
 
 from .runtime_utils import run_db
 from .delivery_job_fence import assert_delivery_job_current
@@ -190,6 +193,31 @@ async def observe_publication(call, *, bot_result=False, expected_count=None):
     return result
 
 
+def unwrap_publication_request(request):
+    """Telethon may wrap an RPC when receive_updates=False."""
+    while isinstance(request, functions.InvokeWithoutUpdatesRequest):
+        request = request.query
+    return request
+
+
+def _remove_custom_emoji(members):
+    """Keep Unicode text and every non-custom entity at its original offset."""
+    removed = 0
+    for member in members:
+        entities = getattr(member, "entities", None)
+        if not entities:
+            continue
+        remaining = [
+            entity for entity in entities
+            if not isinstance(entity, types.MessageEntityCustomEmoji)
+        ]
+        count = len(entities) - len(remaining)
+        if count:
+            member.entities = remaining or None
+            removed += count
+    return removed
+
+
 def _publication_members(request):
     if isinstance(request, functions.messages.SendMultiMediaRequest):
         return list(request.multi_media)
@@ -322,16 +350,6 @@ def publication_client_class(base):
                 except Exception as exc:
                     intent.blocked = True
                     raise PublicationWriteUnavailable("Could not resolve MTProto sender account") from exc
-                read_incident = getattr(intent.repository,"get_publication_inbox_incident",None)
-                if callable(read_incident):
-                    try:
-                        incident = await run_db(read_incident,account_id)
-                    except Exception as exc:
-                        intent.blocked = True
-                        raise PublicationWriteUnavailable("Could not inspect durable inbox health") from exc
-                    if incident and incident["acknowledged_at"] is None:
-                        intent.blocked = True
-                        raise PublicationWriteUnavailable("Publication inbox requires operator review")
                 account_scope = f"mtproto:{account_id}"
                 peer = getattr(item, "peer", None) or getattr(item, "to_peer", None)
                 try:
@@ -340,6 +358,16 @@ def publication_client_class(base):
                     peer_scope = None
 
                 async def publish():
+                    read_incident = getattr(intent.repository, "get_publication_inbox_incident", None)
+                    if callable(read_incident):
+                        try:
+                            incident = await run_db(read_incident, account_id)
+                        except Exception as exc:
+                            intent.blocked = True
+                            raise PublicationWriteUnavailable("Could not inspect durable inbox health") from exc
+                        if incident and incident["acknowledged_at"] is None:
+                            intent.blocked = True
+                            raise PublicationWriteUnavailable("Publication inbox requires operator review")
                     await _bind_identity(account_id, intent, item, members)
                     # The last readiness check must run immediately before
                     # invoke, after all DB/identity/cooldown awaits.
@@ -370,10 +398,43 @@ def publication_client_class(base):
 
                     return await observe_publication(publish_fenced)
 
-                return await run_with_cooldown(
-                    publish, account_scope=account_scope, peer_scope=peer_scope,
-                    backend="telethon", op_name="publish",
-                )
+                async def publish_with_cooldown():
+                    return await run_with_cooldown(
+                        publish, account_scope=account_scope, peer_scope=peer_scope,
+                        backend="telethon", op_name="publish",
+                    )
+
+                try:
+                    return await publish_with_cooldown()
+                except DocumentInvalidError as exc:
+                    # Only a definite rejection of THIS publication permits
+                    # another send. Upload failures, unknown outcomes and
+                    # diagnostic probes must not enter this fallback.
+                    if (intent.blocked or intent.uncertain
+                            or not isinstance(item, (
+                                functions.messages.SendMessageRequest,
+                                functions.messages.SendMediaRequest,
+                                functions.messages.SendMultiMediaRequest,
+                            ))
+                            or unwrap_publication_request(getattr(exc, "request", None)) is not item):
+                        raise
+                    removed = _remove_custom_emoji(members)
+                    if not removed:
+                        raise
+                    logger.warning(
+                        "CUSTOM_EMOJI_FALLBACK | kind=%s | key=%s | removed=%s | action=retry_unicode",
+                        intent.kind, intent.key, removed,
+                    )
+                    # The same request/media handles are reused; the next
+                    # ordinal binds a new durable identity to its changed
+                    # caption. All readiness, lease and cooldown checks run
+                    # again. No recursive fallback if this attempt fails.
+                    result = await publish_with_cooldown()
+                    logger.info(
+                        "CUSTOM_EMOJI_FALLBACK_RESPONSE | kind=%s | key=%s | removed=%s",
+                        intent.kind, intent.key, removed,
+                    )
+                    return result
             finally:
                 _single_rpc.reset(token)
 
