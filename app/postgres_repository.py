@@ -4863,7 +4863,9 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
         remains available to repository callers but is never auto-replayed.
         A legacy stranded owner can only be replaced by an explicit UI rescan.
         """
-        owner_token = uuid.uuid4().hex
+        # Distinguish new low-level owners from genuinely old rows. A UI
+        # request must not replace a still-running low-level operation.
+        owner_token = ("local:" if actor_id is None else "") + uuid.uuid4().hex
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -4877,6 +4879,7 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                     raise RescanBlocked(f"Правило #{rule_id} не найдено")
                 legacy_owner = (
                     rule["rescan_owner_token"] is not None and actor_id is not None
+                    and not str(rule["rescan_owner_token"]).startswith("local:")
                     and rule.get("rescan_operation") is None
                     and rule.get("rescan_lease_until") is None
                     and rule.get("rescan_started_at") is not None
@@ -4886,6 +4889,8 @@ class PostgresRepository(RuleFoldersRepositoryMixin, RepositoryProtocol):
                         "Пересканирование этого правила уже выполняется. "
                         "Прерванная операция восстанавливается автоматически."
                     )
+                if actor_id is None and rule.get("rescan_operation") is not None:
+                    raise RescanBlocked("Завершите пересканирование через существующее меню правила")
                 if expected_scope is not None and expected_scope != self._rescan_scope(rule):
                     raise RescanBlocked("Настройки правила изменились; повторите пересканирование")
                 was_active = bool(rule["is_active"]) and not legacy_owner
