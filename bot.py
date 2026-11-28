@@ -8671,16 +8671,27 @@ async def _shutdown_runtime(
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def drain_consumers():
-        nonlocal repost_campaign_runtime_tasks_local
+    async def drain_workers():
         if stop_workers_runtime:
             await stop_job_workers_runtime(wait_until_complete=True)
+
+    async def drain_campaigns():
+        nonlocal repost_campaign_runtime_tasks_local
         if repost_campaign_runtime_tasks_local is not None:
             await repost_campaign_runtime_tasks_local.stop(wait_until_complete=True)
             repost_campaign_runtime_tasks_local = None
 
-    # Keep one flusher alive across both drains. A slow journal write must
-    # not delay the start of campaign shutdown after the worker drain.
+    async def drain_consumers():
+        # Both runtimes must stop admitting work even if the other is stuck
+        # in cleanup. Join both before propagating errors or closing clients.
+        results = await wait_for_db_task(asyncio.gather(
+            drain_workers(), drain_campaigns(), return_exceptions=True,
+        ))
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+
+    # Keep one flusher alive across both concurrent drains.
     repost_campaign_runtime_tasks_local = repost_campaign_runtime_tasks
     await _drain_with_publication_flush(drain_consumers)
     repost_campaign_runtime_tasks = repost_campaign_runtime_tasks_local
