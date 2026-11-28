@@ -448,13 +448,32 @@ def test_rescan_legacy_video_history_431_and_atomic_rebuild(repo, monkeypatch):
                 (rule_id,target,target,deliveries+list(range(9000001,9000429)),
                  source_ids+list(range(1,429)),[649,650,651]+list(range(1,429))),
             )
+    # Inject the error only inside the rebuild transaction. Release now
+    # writes a durable audit receipt using utc_now_iso as well; a global
+    # patch would also break that separate transaction and strand the owner.
+    restart = repo.restart_rule_queue
+
+    def fail():
+        raise RuntimeError("rebuild failed")
+
+    def fail_rebuild(*args, **kwargs):
+        with monkeypatch.context() as rebuild_patch:
+            rebuild_patch.setattr("app.postgres_repository.utc_now_iso", fail)
+            return restart(*args, **kwargs)
+
     with monkeypatch.context() as patch:
-        def fail():
-            raise RuntimeError("rebuild failed")
-        patch.setattr("app.postgres_repository.utc_now_iso", fail)
+        patch.setattr(repo, "restart_rule_queue", fail_rebuild)
         with pytest.raises(RuntimeError, match="rebuild failed"):
             _restart_from_snapshot(repo, rule_id)
     assert all(repo.get_delivery(d)["status"]=="sent" for d in deliveries)
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT rescan_owner_token,is_active FROM routing WHERE id=%s", (rule_id,))
+            row = cur.fetchone()
+            assert row["rescan_owner_token"] is None and row["is_active"]
+            cur.execute("SELECT COUNT(*) AS n FROM delivery_attempts WHERE rule_id=%s AND idempotency_key LIKE %s",
+                        (rule_id, "%:rescan:%"))
+            assert cur.fetchone()["n"] == 0
     archived, deleted, rebuilt = _restart_from_snapshot(repo, rule_id)
     assert (archived, deleted, rebuilt)==(431,3,3)
     with repo.connect() as conn:
