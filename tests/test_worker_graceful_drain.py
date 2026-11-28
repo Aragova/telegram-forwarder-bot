@@ -134,7 +134,7 @@ def test_shutdown_drains_publication_before_cancelling_retries():
         source.index("async def _shutdown_runtime("):
         source.index("async def _run_scheduler_role_loop()")
     ]
-    assert shutdown.index("await asyncio.wait_for(flush_publication()") < shutdown.index("await stop_background_tasks()")
+    assert shutdown.index("await flush_publication()") < shutdown.index("await stop_background_tasks()")
     assert shutdown.rindex("publication_evidence_unpersisted") > shutdown.index("await stop_background_tasks()")
     assert shutdown.rindex("publication_evidence_unpersisted") < shutdown.index("await raw_telethon.disconnect()")
 
@@ -285,5 +285,43 @@ def test_publication_flush_runs_before_stalled_drain_finishes():
         await asyncio.wait_for(ns["_drain_with_publication_flush"](drain), timeout=1)
         assert flushed.is_set() and drained.is_set()
         assert not any(t.get_name() == "publication-drain-flush" for t in asyncio.all_tasks())
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_flusher_never_starts_optional_durable_replay():
+    import ast
+    from types import SimpleNamespace
+    from app.runtime_utils import wait_for_db_task
+
+    source = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    fn = next(n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
+              and n.name == "_drain_with_publication_flush")
+
+    async def scenario():
+        persisted = asyncio.Event()
+        write_settled = asyncio.Event()
+        drained = asyncio.Event()
+
+        async def persist():
+            persisted.set()
+            await write_settled.wait()
+
+        async def replay():
+            raise AssertionError("Shutdown must not start optional journal replay")
+
+        async def drain():
+            await persisted.wait()
+            drained.set()
+
+        raw = SimpleNamespace(persist_publication_evidence=persist, flush_publication_inbox=replay)
+        ns = {"asyncio": asyncio, "logger": logging.getLogger(__name__),
+              "telethon_client": raw, "wait_for_db_task": wait_for_db_task}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), "bot.py", "exec"), ns)
+        task = asyncio.create_task(ns["_drain_with_publication_flush"](drain))
+        await asyncio.wait_for(drained.wait(), timeout=1)
+        assert not task.done()
+        write_settled.set()
+        await asyncio.wait_for(task, timeout=1)
 
     asyncio.run(scenario())
