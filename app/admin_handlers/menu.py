@@ -2,13 +2,26 @@ from __future__ import annotations
 
 from aiogram import Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 from .context import AdminHandlersContext
 from app.rule_folder_handlers import clear_folder_input
 
 
 def register_admin_menu_handlers(dp: Dispatcher, ctx: AdminHandlersContext) -> None:
+    # Historical Telegram messages can survive a deployment. Consume retired
+    # callback IDs without touching deliveries, jobs, or any repository method.
+    @dp.callback_query(lambda c: (c.data or "") == "reset_back" or (c.data or "").startswith("reset_source:"))
+    async def handle_retired_queue_callback(callback: CallbackQuery):
+        if not await ctx.is_admin_callback(callback):
+            return
+        ctx.reset_user_state(callback.from_user.id)
+        clear_folder_input(callback.from_user.id)
+        await ctx.answer_callback_safe(callback, "Раздел очереди удалён. Используйте меню правил.", show_alert=True)
+        if callback.message is not None and callback.message.chat.type == "private":
+            await ctx.send_message_safe(chat_id=callback.message.chat.id, text="📋 Главное меню",
+                                        reply_markup=ctx.get_main_menu())
+
     @dp.message(Command("menu"))
     async def cmd_menu(message: Message):
         await handle_start(message)

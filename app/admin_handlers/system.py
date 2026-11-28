@@ -28,12 +28,12 @@ def _billing_home_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="admin_fixed_prices_kind:stars")],
         [InlineKeyboardButton(text="₿ Crypto", callback_data="admin_fixed_prices_kind:crypto")],
         [InlineKeyboardButton(text="💱 Курсы валют", callback_data="admin_billing_rates")],
-        [InlineKeyboardButton(text="⬅️ Назад в систему", callback_data="admin_billing_home_back")],
+        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="admin_billing_home_back")],
     ])
 
 
 BILLING_HOME_TEXT = (
-    "<b>💳 БИЛЛИНГ И ТАРИФЫ</b>\n\n"
+    "<b>💳 ФИНАНСЫ</b>\n\n"
     "💎 <b>BASIC</b>\n🚀 <b>PRO</b>\n\n"
     "USD и курсы валют, отдельные фиксированные цены Stars и Crypto."
 )
@@ -143,7 +143,7 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
             ctx.reset_user_state(message.from_user.id)
         await ctx.send_message_safe(chat_id=message.chat.id, text="⚙️ Раздел: Система", reply_markup=ctx.get_system_menu())
 
-    @dp.message(lambda m: _normalize_button_text(m.text) == "💳 Биллинг и тарифы")
+    @dp.message(lambda m: _normalize_button_text(m.text) in {"💳 Финансы", "💳 Биллинг и тарифы"})
     async def handle_billing_home(message: Message):
         if not await ctx.is_admin(message):
             return
@@ -169,8 +169,8 @@ def register_admin_system_handlers(dp: Dispatcher, ctx: AdminHandlersContext) ->
         ctx.reset_user_state(callback.from_user.id)
         await ctx.answer_callback_safe_once(callback)
         await ctx.edit_message_text_safe(message=callback.message, text="Настройки биллинга закрыты.")
-        await ctx.send_message_safe(chat_id=callback.message.chat.id, text="⚙️ Раздел: Система",
-                                    reply_markup=ctx.get_system_menu())
+        await ctx.send_message_safe(chat_id=callback.message.chat.id, text="📋 Главное меню",
+                                    reply_markup=ctx.get_main_menu())
 
     @dp.message(lambda m: _normalize_button_text(m.text) == "💱 Курсы валют")
     async def handle_billing_rates_menu(message: Message):

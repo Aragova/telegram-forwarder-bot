@@ -60,8 +60,6 @@ from app.keyboards import (
     get_diagnostics_menu,
     get_entity_kind_keyboard,
     get_main_menu,
-    get_queue_menu,
-    get_reset_queue_menu,
     get_rules_menu,
     get_start_keyboard,
     get_system_menu,
@@ -146,7 +144,6 @@ from app.admin_handlers import (
     AdminHandlersContext,
     register_admin_menu_handlers,
     register_admin_channel_handlers,
-    register_admin_queue_handlers,
     register_admin_diagnostics_handlers,
     register_admin_system_handlers,
 )
@@ -207,10 +204,13 @@ MENU_NAVIGATION_TEXTS = {
     "📈 Живой статус",
     "🔄 Правила",
     "📡 Каналы",
-    "📦 Очередь",
+    "📦 Очередь",  # retired reply keyboard, navigation only
+    "📋 Очередь",
+    "📋 Общая очередь",
     "⚠️ Диагностика",
     "⚙️ Система",
-    "💳 Биллинг и тарифы",
+    "💳 Финансы",
+    "💳 Биллинг и тарифы",  # legacy billing reply keyboard
     "💱 Курсы валют",
     "💵 Цены тарифов",
     "💫 Фикс-цены Stars/Crypto",
@@ -273,7 +273,13 @@ ADMIN_REPLY_KEYBOARD_ALIASES = {
     "📈 Живой статус": "📈 Живой статус",
     "🔄 Правила": "🔄 Правила",
     "📡 Каналы": "📡 Каналы",
-    "📦 Очередь": "📦 Очередь",
+    # Old keyboards must never fall through to stateful inputs or bulk reset.
+    "📦 Очередь": "📋 Меню",
+    "📋 Очередь": "📋 Меню",
+    "📋 Общая очередь": "📋 Меню",
+    "🔄 Сброс": "📋 Меню",
+    "🔄 Сбросить всё": "📋 Меню",
+    "📊 Сброс по источнику": "📋 Меню",
     "⚠ Диагностика": "⚠️ Диагностика",
     "⚙ Система": "⚙️ Система",
     "▶ Запустить пересылку": "▶️ Запустить пересылку",
@@ -1544,8 +1550,6 @@ def compact_rule_text(rule) -> str:
     return (base[:57] + "...") if len(base) > 60 else base
 
 
-def source_label(choice: ChannelChoice) -> str:
-    return f"{choice.title}{f' (тема {choice.thread_id})' if choice.thread_id else ''}"
 def parse_next_run_user_time(text: str) -> str | None:
     text = text.strip()
 
@@ -2232,19 +2236,6 @@ def build_rescan_rule_keyboard(rule_id: int) -> InlineKeyboardMarkup:
             ],
         ]
     )
-
-def sources_inline_keyboard(sources: list[ChannelChoice]) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    for idx, src in enumerate(sources):
-        label = source_label(src)
-        rows.append([
-            InlineKeyboardButton(
-                text=(label[:57] + "...") if len(label) > 60 else label,
-                callback_data=f"reset_source:{idx}",
-            )
-        ])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="reset_back")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 async def ensure_rule_workers() -> None:
     # Историческое имя функции: теперь в проекте используются только job workers.
@@ -3009,9 +3000,6 @@ async def handle_admin_reply_keyboard_router(message: Message):
         return
     if canonical == "📡 Каналы":
         await reply_message_safe(message, "📡 Раздел: Каналы", reply_markup=get_channels_menu())
-        return
-    if canonical == "📦 Очередь":
-        await reply_message_safe(message, "📦 Раздел: Очередь", reply_markup=get_queue_menu())
         return
     if canonical == "⚠️ Диагностика":
         await reply_message_safe(message, "⚠️ Раздел: Диагностика", reply_markup=get_diagnostics_menu())
@@ -8906,11 +8894,9 @@ def _register_admin_handlers() -> None:
         build_system_journal_inline_keyboard=build_system_journal_inline_keyboard,
         edit_message_text_safe=lambda *a, **k: edit_message_text_safe(*a, **k),
         get_channels_menu=get_channels_menu,
-        get_queue_menu=get_queue_menu,
         get_diagnostics_menu=get_diagnostics_menu,
         get_system_menu=get_system_menu,
         get_rules_menu=get_rules_menu,
-        get_reset_queue_menu=get_reset_queue_menu,
         get_channel_type_keyboard=get_channel_type_keyboard,
         get_entity_kind_keyboard=get_entity_kind_keyboard,
         get_cancel_keyboard=get_cancel_keyboard,
@@ -8932,7 +8918,6 @@ def _register_admin_handlers() -> None:
     )
     register_admin_menu_handlers(dp, ctx)
     register_admin_channel_handlers(dp, ctx)
-    register_admin_queue_handlers(dp, ctx)
     register_admin_diagnostics_handlers(dp, ctx)
     register_admin_system_handlers(dp, ctx)
     admin_handlers_ctx = ctx

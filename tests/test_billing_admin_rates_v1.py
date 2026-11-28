@@ -1,5 +1,5 @@
 from app import billing_catalog
-from app.keyboards import get_system_menu
+from app.keyboards import get_main_menu, get_system_menu
 
 
 class _Repo:
@@ -14,10 +14,12 @@ class _Repo:
         return dict(self.usd_prices)
 
 
-def test_admin_system_menu_contains_rates_button():
+def test_admin_finance_in_main_menu_only():
     kb = get_system_menu()
     texts = [btn.text for row in kb.keyboard for btn in row]
-    assert "💳 Биллинг и тарифы" in texts
+    assert "💳 Биллинг и тарифы" not in texts
+    assert "💳 Финансы" not in texts
+    assert "💳 Финансы" in [btn.text for row in get_main_menu().keyboard for btn in row]
     assert "💱 Курсы валют" not in texts
     assert "💵 Цены тарифов" not in texts
     assert "💫 Фикс-цены Stars/Crypto" not in texts

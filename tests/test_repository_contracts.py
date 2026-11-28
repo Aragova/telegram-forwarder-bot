@@ -147,26 +147,16 @@ def test_backfill_rule_skips_self_target_echo_posts():
     assert "SELECT id, message_id" in source
 
 
-def test_reset_queue_does_not_resurrect_self_target_echo_deliveries():
-    import inspect
+def test_unsafe_bulk_reset_methods_are_removed_from_repository():
     from app.postgres_repository import PostgresRepository
+    from app.repository import RepositoryProtocol
 
-    reset_source = inspect.getsource(PostgresRepository.reset_queue_for_source)
-    reset_all = inspect.getsource(PostgresRepository.reset_all_queue)
-
-    assert "AND status = 'sent'" in reset_source
-    assert "WHERE status = 'sent'" in reset_all
-
-
-def test_existing_manual_cleanup_self_target_echo_remains_terminal():
-    import inspect
-    from app.postgres_repository import PostgresRepository
-
-    reset_source = inspect.getsource(PostgresRepository.reset_queue_for_source)
-    reset_all = inspect.getsource(PostgresRepository.reset_all_queue)
-
-    assert "self_target_echo_blocked_manual_cleanup" not in reset_source
-    assert "self_target_echo_blocked_manual_cleanup" not in reset_all
-    assert "faulty" not in reset_source.lower()
-    assert reset_all.count("WHERE status = 'sent'") == 1
-    assert "WHERE status IN" not in reset_all
+    for name in ("reset_all_deliveries", "reset_source_deliveries",
+                 "reset_queue_for_source", "reset_all_queue"):
+        assert not hasattr(PostgresRepository, name)
+        assert not hasattr(RepositoryProtocol, name)
+    # Shared queue/statistics and safe per-rule rescan are still available.
+    for name in ("get_queue_stats", "get_tenant_queue_stats", "begin_rule_rescan",
+                 "get_due_delivery", "take_due_delivery_and_create_job",
+                 "recover_stale_delivery_jobs", "quarantine_orphaned_processing_rule"):
+        assert callable(getattr(PostgresRepository, name))

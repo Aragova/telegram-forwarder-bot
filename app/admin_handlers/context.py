@@ -39,11 +39,9 @@ class AdminHandlersContext:
     build_system_journal_inline_keyboard: Callable[..., Any] | None = None
     edit_message_text_safe: Callable[..., Any] | None = None
     get_channels_menu: Callable[..., Any] | None = None
-    get_queue_menu: Callable[..., Any] | None = None
     get_diagnostics_menu: Callable[..., Any] | None = None
     get_system_menu: Callable[..., Any] | None = None
     get_rules_menu: Callable[..., Any] | None = None
-    get_reset_queue_menu: Callable[..., Any] | None = None
     get_channel_type_keyboard: Callable[..., Any] | None = None
     get_entity_kind_keyboard: Callable[..., Any] | None = None
     get_cancel_keyboard: Callable[..., Any] | None = None
