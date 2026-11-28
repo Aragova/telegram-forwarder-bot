@@ -75,7 +75,7 @@ def test_rejected_cas_must_abort_old_worker_before_restart_download_cleanup(monk
         def __init__(self, *args):
             pass
 
-        def can_enqueue_job(self, tenant_id):
+        def can_execute_admitted_job(self, tenant_id):
             return True, None
 
         def can_process_video(self, tenant_id):

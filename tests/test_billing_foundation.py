@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 
@@ -96,7 +96,7 @@ class _FakeRepo:
         return list(reversed(rows))[:limit]
 
     def bump_usage(self, tenant_id: int, *, jobs_delta: int = 0, video_delta: int = 0, storage_delta_mb: int = 0, api_calls_delta: int = 0):
-        key = (tenant_id, date.today().isoformat())
+        key = (tenant_id, datetime.now(timezone.utc).date().isoformat())
         row = self.usage_rows.setdefault(key, {"jobs_count": 0, "video_count": 0, "storage_used_mb": 0, "api_calls": 0})
         row["jobs_count"] += jobs_delta
         row["video_count"] += video_delta

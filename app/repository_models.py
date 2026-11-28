@@ -14,6 +14,11 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def utc_day_iso() -> str:
+    """UTC calendar key for daily usage; no reset is needed at midnight."""
+    return datetime.now(timezone.utc).date().isoformat()
+
+
 def normalize_fixed_times(times: list[str]) -> list[str]:
     normalized: list[str] = []
 

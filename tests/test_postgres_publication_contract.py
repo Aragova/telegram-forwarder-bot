@@ -309,6 +309,9 @@ def repo():
     repository = PostgresRepository()
     try:
         repository.init()
+        # Publication fixtures use the default tenant, which is an OWNER in production.
+        if (repository.get_active_subscription(1) or {}).get("plan_name") != "OWNER":
+            repository.assign_subscription(1, repository.get_plan_by_name("OWNER")["id"])
         yield repository
     finally:
         repository.client.close_all_connections()
@@ -2179,3 +2182,95 @@ def test_billing_rejects_nonfinite_prices_without_persistence(repo):
                                                 period_months=1, value={"amount": str(invalid)})
     assert not repo.set_billing_fixed_price(kind="stars", tariff_code="basic",
                                             period_months=1, value={"amount": 1.5})
+
+
+def _seed_usage_admission_rule(repo, tenant_id, count=1):
+    suffix = uuid4().int % 10**12
+    source, target = f"-100810{suffix}", f"-100910{suffix}"
+    group = f"usage-group-{suffix}" if count > 1 else None
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO routing(source_id,target_id,created_date,tenant_id,mode,is_active,interval)
+                   VALUES (%s,%s,'2026-01-01',%s,'repost',TRUE,60) RETURNING id""",
+                (source, target, tenant_id),
+            )
+            rule_id = cur.fetchone()["id"]
+            for message_id in range(1, count + 1):
+                cur.execute(
+                    """INSERT INTO posts(message_id,source_channel,content_json,media_group_id,created_at)
+                       VALUES (%s,%s,'{"media_kind":"text"}',%s,'2026-01-01') RETURNING id""",
+                    (message_id, source, group),
+                )
+                post_id = cur.fetchone()["id"]
+                cur.execute(
+                    """INSERT INTO deliveries(rule_id,post_id,status,created_at,tenant_id)
+                       VALUES (%s,%s,'pending','2026-01-01',%s)""",
+                    (rule_id, post_id, tenant_id),
+                )
+    return rule_id
+
+
+def test_atomic_job_usage_concurrent_last_slot(repo):
+    from concurrent.futures import ThreadPoolExecutor
+    from app.repository_models import utc_day_iso, utc_now_iso
+
+    tenant_id = uuid4().int % 10**12 + 1000
+    plan = repo.get_plan_by_name("FREE")
+    repo.assign_subscription(tenant_id, plan["id"])
+    cap = int(plan["max_jobs_per_day"])
+    day = utc_day_iso()
+    repo.bump_usage(tenant_id, jobs_delta=cap - 1)
+    rules = [_seed_usage_admission_rule(repo, tenant_id) for _ in range(2)]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda rule: repo.take_due_delivery_and_create_job(rule, utc_now_iso()), rules))
+    assert sorted(result["status"] for result in results) == ["created", "limit_blocked"]
+    assert repo.get_usage_for_date(tenant_id, day)["jobs_count"] == cap
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM deliveries WHERE rule_id=ANY(%s) ORDER BY status", (rules,))
+            assert [row["status"] for row in cur.fetchall()] == ["pending", "processing"]
+    winner = rules[next(i for i, result in enumerate(results) if result["status"] == "created")]
+    assert repo.take_due_delivery_and_create_job(winner, utc_now_iso()) is None
+    assert repo.get_usage_for_date(tenant_id, day)["jobs_count"] == cap
+
+
+def test_atomic_job_usage_rolls_back_and_counts_album_once(repo, monkeypatch):
+    from app.repository_models import utc_day_iso, utc_now_iso
+
+    tenant_id = uuid4().int % 10**12 + 1000
+    repo.assign_subscription(tenant_id, repo.get_plan_by_name("OWNER")["id"])
+    rule_id = _seed_usage_admission_rule(repo, tenant_id, count=2)
+    day = utc_day_iso()
+    with monkeypatch.context() as patch:
+        def fail_schedule(*args, **kwargs):
+            raise RuntimeError("injected failure after job insertion")
+        patch.setattr(repo, "_find_next_interval_slot", fail_schedule)
+        with pytest.raises(RuntimeError, match="injected failure"):
+            repo.take_due_delivery_and_create_job(rule_id, utc_now_iso())
+    assert repo.get_usage_for_date(tenant_id, day)["jobs_count"] == 0
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM deliveries WHERE rule_id=%s", (rule_id,))
+            assert [row["status"] for row in cur.fetchall()] == ["pending", "pending"]
+            cur.execute("SELECT COUNT(*) AS cnt FROM jobs WHERE payload_json->>'rule_id'=%s", (str(rule_id),))
+            assert cur.fetchone()["cnt"] == 0
+    result = repo.take_due_delivery_and_create_job(rule_id, utc_now_iso())
+    assert result["status"] == "created"
+    assert result["job_type"] == "repost_album"
+    assert repo.get_usage_for_date(tenant_id, day)["jobs_count"] == 1
+
+
+def test_atomic_job_usage_denies_inactive_subscription(repo):
+    from app.repository_models import utc_day_iso, utc_now_iso
+
+    tenant_id = uuid4().int % 10**12 + 1000
+    rule_id = _seed_usage_admission_rule(repo, tenant_id)
+    result = repo.take_due_delivery_and_create_job(rule_id, utc_now_iso())
+    assert result["status"] == "limit_blocked"
+    assert result["reason"] == "Подписка неактивна"
+    assert repo.get_usage_for_date(tenant_id, utc_day_iso())["jobs_count"] == 0
+    with repo.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM deliveries WHERE rule_id=%s", (rule_id,))
+            assert cur.fetchone()["status"] == "pending"

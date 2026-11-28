@@ -524,7 +524,13 @@ async def _process_job(repo, sender_service, worker_id: str, queue: str, job: di
 
     publication_key = await existing_publication_key_for_job(repo, job_type, payload, tenant_id)
     reconcile_only = publication_key is not None
-    can_enqueue, enqueue_reason = (True, None) if reconcile_only else await asyncio.to_thread(limit_service.can_enqueue_job, tenant_id)
+    # Delivery jobs have already consumed quota at admission, including retries
+    # and all stages of a video. Keep the subscription gate, not a second quota gate.
+    admission_check = (
+        limit_service.can_execute_admitted_job if job_type in DELIVERY_JOB_TYPES
+        else limit_service.can_enqueue_job
+    )
+    can_enqueue, enqueue_reason = (True, None) if reconcile_only else await asyncio.to_thread(admission_check, tenant_id)
     if not can_enqueue:
         logger.warning("Worker блокирует выполнение job #%s tenant_id=%s: %s", job_id, tenant_id, enqueue_reason)
         if hasattr(repo, "create_billing_event"):

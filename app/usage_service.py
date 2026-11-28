@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
 from typing import Any
+
+from app.repository_models import utc_day_iso
 
 
 class UsageService:
@@ -19,12 +20,7 @@ class UsageService:
     def get_today_usage(self, tenant_id: int):
         if not hasattr(self._repo, "get_usage_for_date"):
             return {"jobs_count": 0, "video_count": 0, "storage_used_mb": 0, "api_calls": 0}
-        return self._repo.get_usage_for_date(int(tenant_id), date.today().isoformat())
-
-    def reset_daily_usage(self) -> int:
-        if not hasattr(self._repo, "reset_usage_for_day"):
-            return 0
-        return int(self._repo.reset_usage_for_day(date.today().isoformat()) or 0)
+        return self._repo.get_usage_for_date(int(tenant_id), utc_day_iso())
 
     def build_usage_snapshot(self, tenant_id: int, date_from: str, date_to: str) -> dict[str, Any]:
         if hasattr(self._repo, "get_usage_for_period"):

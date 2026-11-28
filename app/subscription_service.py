@@ -46,7 +46,10 @@ class SubscriptionService:
         return sub_id
 
     def is_subscription_active(self, tenant_id: int) -> bool:
-        sub = self.get_active_subscription(tenant_id)
+        return self.is_active_snapshot(self.get_active_subscription(tenant_id))
+
+    @staticmethod
+    def is_active_snapshot(sub: dict[str, Any] | None) -> bool:
         if not sub:
             return False
         status = str(sub.get("status") or "")

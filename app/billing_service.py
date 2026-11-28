@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from app.invoice_service import InvoiceService
+from app.repository_models import utc_day_iso
 from app.subscription_service import SubscriptionService
 from app.usage_service import UsageService
 
@@ -333,7 +334,7 @@ class BillingService:
         if period:
             billing_period_snapshot = self.build_billing_usage_snapshot(int(tenant_id), period["period_start"], period["period_end"])
         else:
-            today = date.today().isoformat()
+            today = utc_day_iso()
             billing_period_snapshot = self.build_billable_usage_snapshot(int(tenant_id), today, today)
         today_snapshot = self._usage_service.get_today_usage(int(tenant_id))
         events = self.get_recent_billing_events(int(tenant_id), limit=5)

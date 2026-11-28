@@ -95,23 +95,28 @@ class SubscriptionRepository(RepositorySplitBase):
             conn.commit()
             return int(row["id"]) if row else None
 
+    @staticmethod
+    def get_active_subscription_row(cur, tenant_id: int, *, lock: bool = False) -> dict[str, Any] | None:
+        query = """
+            SELECT s.*, p.name AS plan_name, p.max_rules, p.max_workers,
+                   p.max_jobs_per_day, p.max_video_per_day, p.max_storage_mb, p.priority_level
+            FROM subscriptions s
+            JOIN plans p ON p.id = s.plan_id
+            WHERE s.tenant_id = %s
+              AND s.status IN ('active', 'trial', 'grace')
+            ORDER BY s.id DESC
+            LIMIT 1
+        """
+        if lock:
+            query += " FOR SHARE OF s, p"
+        cur.execute(query, (int(tenant_id),))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
     def get_active_subscription(self, tenant_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT s.*, p.name AS plan_name, p.max_rules, p.max_workers, p.max_jobs_per_day, p.max_video_per_day, p.max_storage_mb, p.priority_level
-                    FROM subscriptions s
-                    JOIN plans p ON p.id = s.plan_id
-                    WHERE s.tenant_id = %s
-                      AND s.status IN ('active', 'trial', 'grace')
-                    ORDER BY s.id DESC
-                    LIMIT 1
-                    """,
-                    (int(tenant_id),),
-                )
-                row = cur.fetchone()
-        return dict(row) if row else None
+                return self.get_active_subscription_row(cur, tenant_id)
 
     def get_latest_subscription(self, tenant_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:

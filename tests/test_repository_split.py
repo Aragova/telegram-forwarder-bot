@@ -121,7 +121,6 @@ def test_billing_and_usage_facade_compatibility(monkeypatch):
     assert repo.get_usage_for_date(1, "2026-01-01")["method"] == "get_usage_for_date"
     assert repo.get_usage_for_period(1, "2026-01-01", "2026-01-31")["method"] == "get_usage_for_period"
     assert repo.build_billing_usage_data(1, "2026-01-01", "2026-01-31")["method"] == "build_billing_usage_data"
-    assert repo.reset_usage_for_day("2026-01-01") == 1
     assert repo.count_rules_for_tenant(1) == 1
     assert repo.get_rule_tenant_id(1) == 1
     assert repo.get_saas_health_snapshot()["method"] == "get_saas_health_snapshot"
