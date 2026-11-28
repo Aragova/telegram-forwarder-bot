@@ -52,3 +52,40 @@ async def maintain_rescan_lease(repo, run_db, rule_id: int, owner_token: str):
         stopping.set()
         task.cancel()
         await wait_for_db_task(asyncio.gather(task, return_exceptions=True))
+
+
+# Bound only network waits, never the parser's off-thread SQL batches.
+_RESCAN_TELEGRAM_IDLE_SEC = 180.0
+
+
+class RescanTelegramReader:
+    """Limit each Telegram read; every yielded message starts a fresh budget."""
+
+    def __init__(self, client, *, idle_timeout_sec=None):
+        self.client = client
+        self.idle_timeout_sec = (
+            _RESCAN_TELEGRAM_IDLE_SEC if idle_timeout_sec is None else idle_timeout_sec
+        )
+
+    async def get_entity(self, *args, **kwargs):
+        async with asyncio.timeout(self.idle_timeout_sec):
+            return await self.client.get_entity(*args, **kwargs)
+
+    async def get_messages(self, *args, **kwargs):
+        async with asyncio.timeout(self.idle_timeout_sec):
+            return await self.client.get_messages(*args, **kwargs)
+
+    async def iter_messages(self, *args, **kwargs):
+        iterator = aiter(self.client.iter_messages(*args, **kwargs))
+        try:
+            while True:
+                try:
+                    async with asyncio.timeout(self.idle_timeout_sec):
+                        message = await anext(iterator)
+                except StopAsyncIteration:
+                    return
+                yield message
+        finally:
+            close = getattr(iterator, "aclose", None)
+            if close is not None:
+                await close()

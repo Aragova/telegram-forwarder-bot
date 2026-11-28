@@ -725,6 +725,8 @@ def _load_rescan_handler(name, namespace):
 
     namespace.setdefault("maintain_rescan_lease", lease)
     namespace.setdefault("rescan_db", db_write)
+    from app.rescan_runtime import RescanTelegramReader
+    namespace.setdefault("RescanTelegramReader", RescanTelegramReader)
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     namespace.setdefault("InlineKeyboardButton", InlineKeyboardButton)
     namespace.setdefault("InlineKeyboardMarkup", InlineKeyboardMarkup)
@@ -1185,6 +1187,8 @@ def test_recovery_keeps_original_cursor_even_after_partial_history_scan():
         94, was_active=True, owner_token="new-owner", queue_rebuilt=True,
     )
     show.assert_not_awaited()
+    assert repo.log_rule_change.call_args.kwargs["new_value"] is None
+    assert repo.log_rule_change.call_args.kwargs["old_value"]["old_next_run_at"] == "2026-11-26"
 
 
 def test_rescan_stops_heartbeat_before_finishing_owner():

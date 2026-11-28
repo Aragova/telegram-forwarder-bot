@@ -217,3 +217,48 @@ def test_heartbeat_retries_transient_failure_while_context_active(monkeypatch):
         assert calls >= 2
 
     asyncio.run(scenario())
+
+
+def test_rescan_telegram_reader_bounds_stalled_history_but_not_total_scan():
+    from app.rescan_runtime import RescanTelegramReader
+
+    async def scenario():
+        closed = asyncio.Event()
+
+        class Client:
+            async def iter_messages(self):
+                try:
+                    yield 1
+                    yield 2
+                    await asyncio.Event().wait()
+                finally:
+                    closed.set()
+
+        reader = RescanTelegramReader(Client(), idle_timeout_sec=0.02)
+        values = []
+        with pytest.raises(TimeoutError):
+            async for value in reader.iter_messages():
+                values.append(value)
+                # SQL/processing time outside the Telegram read is not timed.
+                await asyncio.sleep(0.03)
+        assert values == [1, 2] and closed.is_set()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("method", ["get_entity", "get_messages"])
+def test_rescan_telegram_reader_bounds_each_rpc(method):
+    from unittest.mock import AsyncMock
+    from app.rescan_runtime import RescanTelegramReader
+
+    async def scenario():
+        async def stalled(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        client = Mock()
+        setattr(client, method, AsyncMock(side_effect=stalled))
+        reader = RescanTelegramReader(client, idle_timeout_sec=0.01)
+        with pytest.raises(TimeoutError):
+            await getattr(reader, method)("peer")
+
+    asyncio.run(scenario())

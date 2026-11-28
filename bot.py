@@ -46,7 +46,7 @@ from app.rule_catalog import CATALOG_PAGE_SIZE, RulePage
 from app.user_handlers.rules import build_user_rules_keyboard as build_user_rules_keyboard_view
 from app.repository import RepositoryProtocol
 from app.rescan_safety import RescanBlocked, RescanSourceWriter
-from app.rescan_runtime import maintain_rescan_lease, rescan_db
+from app.rescan_runtime import RescanTelegramReader, maintain_rescan_lease, rescan_db
 from app.repository_factory import create_repository
 from app.transport import wrap_bot, wrap_telethon_client
 from app.transport_policy import (
@@ -172,6 +172,7 @@ posting_active = False
 runtime_ownership = RuntimeOwnership()
 job_workers = JobWorkerLifecycle(runtime_ownership, logger)
 reaction_worker_task: asyncio.Task | None = None
+reaction_worker_stop: asyncio.Event | None = None
 scheduler_runtime_task: asyncio.Task | None = None
 job_watchdog_task: asyncio.Task | None = None
 user_states: dict[int, dict[str, Any]] = {}
@@ -594,13 +595,14 @@ async def _report_rescan_release_failure(*, rule_id: int, chat_id: int,
 async def _scan_rule_source(rule, rule_id: int, owner_token: str):
     """Shared full-history scan; every parser write carries the durable fence."""
     writer = RescanSourceWriter(db, rule_id, owner_token)
+    reader = RescanTelegramReader(telethon_client)
     if rule.source_thread_id is None:
         return await parse_channel_history(
-            telethon_client, writer, str(rule.source_id), clean_start=False,
+            reader, writer, str(rule.source_id), clean_start=False,
             preserve_existing_deliveries=True, collect_seen_message_ids=True,
         )
     return await parse_group_history(
-        telethon_client, writer, str(rule.source_id), int(rule.source_thread_id),
+        reader, writer, str(rule.source_id), int(rule.source_thread_id),
         clean_start=False, preserve_existing_deliveries=True, collect_seen_message_ids=True,
     )
 
@@ -614,10 +616,11 @@ async def _verify_rescan_live_arrivals(rule_id: int, rule, watermark: int,
         return missing
     source = str(rule.source_id)
     entity = int(source) if source.lstrip("-").isdigit() else source
-    chat = await telethon_client.get_entity(entity)
+    reader = RescanTelegramReader(telethon_client)
+    chat = await reader.get_entity(entity)
     for start in range(0, len(candidates), 100):
         batch = candidates[start:start + 100]
-        messages = await telethon_client.get_messages(chat, ids=batch)
+        messages = await reader.get_messages(chat, ids=batch)
         if len(messages) != len(batch):
             raise RuntimeError("Неполный ответ Telegram при сверке новых записей")
         for mid, message in zip(batch, messages):
@@ -774,6 +777,7 @@ async def _run_rescan_rule_job(
                 await _show_rule_processing_screen(
                     chat_id=chat_id, message_id=message_id,
                     text=f"🔄 Пересканирование правила #{rule_id}\n\nРежим: {mode_text}\nЧитаем историю источника.",
+                    reply_markup=_rescan_wait_keyboard(rule_id),
                     terminal=False,
                 )
             parsed_count, seen_message_ids = await _scan_rule_source(rule, rule_id, owner_token)
@@ -804,7 +808,7 @@ async def _run_rescan_rule_job(
                     "old_value": {"preserved_sent_history": True,
                                   "saved_first_pending_message_id": before_message_id,
                                   "old_next_run_at": old_next_run_at},
-                    "new_value": {"next_run_at": old_next_run_at},
+                    "new_value": None,
                     "extra": {"mode": "keep_position", "rebuilt_count": rebuilt_count,
                               "preserved_sent_history": True, "excluded_before": removed_before,
                               "removed_stale": removed_stale, "quarantined": quarantined,
@@ -8672,7 +8676,7 @@ async def _shutdown_runtime(
     close_telegram_clients: bool,
     close_bot_session: bool,
 ) -> bool:
-    global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, repost_campaign_runtime_tasks, channel_title_sync_task, rescan_recovery_task, rescan_recovery_stop
+    global telethon_client, reaction_clients, sender_service, bot, runtime_context, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, reaction_worker_stop, repost_campaign_runtime_tasks, channel_title_sync_task, rescan_recovery_task, rescan_recovery_stop
 
     runtime_ownership.begin_shutdown()
     # Signal every producer before awaiting any join. A scheduler SQL tick
@@ -8681,6 +8685,8 @@ async def _shutdown_runtime(
         scheduler_runtime_task.cancel()
     if rescan_recovery_stop is not None:
         rescan_recovery_stop.set()
+    if reaction_worker_stop is not None:
+        reaction_worker_stop.set()
     if rescan_recovery_job is not None and not rescan_recovery_job.done() and not rescan_recovery_job.cancelling():
         rescan_recovery_job.cancel()
     tasks = list(rule_ui_tasks.values())
@@ -8711,11 +8717,20 @@ async def _shutdown_runtime(
             await repost_campaign_runtime_tasks_local.stop(wait_until_complete=True)
             repost_campaign_runtime_tasks_local = None
 
+    async def drain_reactions():
+        global reaction_worker_task, reaction_worker_stop
+        if reaction_worker_task is not None:
+            # Do not abandon in-flight reaction DB writes or Telegram calls.
+            await asyncio.gather(reaction_worker_task, return_exceptions=True)
+        reaction_worker_task = None
+        reaction_worker_stop = None
+
     async def drain_consumers():
         # All runtimes must stop admitting work even if another is stuck.
         # Join all before propagating errors or closing clients.
         results = await wait_for_db_task(asyncio.gather(
-            drain_producers(), drain_workers(), drain_campaigns(), return_exceptions=True,
+            drain_producers(), drain_workers(), drain_campaigns(), drain_reactions(),
+            return_exceptions=True,
         ))
         for result in results:
             if isinstance(result, BaseException):
@@ -8746,10 +8761,6 @@ async def _shutdown_runtime(
         job_watchdog_task.cancel()
         await asyncio.gather(job_watchdog_task, return_exceptions=True)
     job_watchdog_task = None
-    if reaction_worker_task and not reaction_worker_task.done():
-        reaction_worker_task.cancel()
-        await asyncio.gather(reaction_worker_task, return_exceptions=True)
-    reaction_worker_task = None
 
     # Drain publication evidence before stopping its retry tasks or closing
     # Telethon. If both the SQLite spool and fsynced fallback journal were
@@ -8887,7 +8898,7 @@ async def _start_worker_role() -> None:
 
 
 async def _start_all_role() -> None:
-    global posting_active, scheduler_runtime_task, job_watchdog_task, reaction_worker_task
+    global posting_active, scheduler_runtime_task, job_watchdog_task, reaction_worker_task, reaction_worker_stop
     runtime_ownership.bind("all")
     posting_active = False
     await _init_db_runtime()
@@ -8912,7 +8923,8 @@ async def _start_all_role() -> None:
         job_watchdog_task = create_background_task(run_watchdog_loop(db, interval_seconds=10.0))
     if reaction_worker_task is None or reaction_worker_task.done():
         reaction_worker = ReactionWorker(db=db, worker_id="reaction-worker-1", poll_interval_sec=2.0, lock_timeout_seconds=300)
-        reaction_worker_task = create_background_task(reaction_worker.run_forever())
+        reaction_worker_stop = asyncio.Event()
+        reaction_worker_task = create_background_task(reaction_worker.run_forever(stop_event=reaction_worker_stop))
         logger.info("Reaction worker запущен: reaction-worker-1")
     await start_job_workers_runtime(resume=True)
     start_background_task(_supervise_job_workers(), name="job-workers-supervisor")

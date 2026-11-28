@@ -184,7 +184,7 @@ def test_runtime_role_owns_polling_and_job_workers(role, owns_polling, owns_work
             "runtime_ownership": ownership, "job_workers": lifecycle,
             "WORKER_RESOURCE_POLICY": SimpleNamespace(graceful_shutdown_timeout_sec=0),
             "scheduler_runtime_task": None, "job_watchdog_task": None,
-            "reaction_worker_task": None,
+            "reaction_worker_task": None, "reaction_worker_stop": None,
             "DEFAULT_TELEGRAM_COMMANDS": [], "BotCommandScopeDefault": object,
             "_init_db_runtime": AsyncMock(), "_init_sender_runtime": AsyncMock(),
             "_run_worker_role_loop": try_start_workers,
