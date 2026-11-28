@@ -362,3 +362,81 @@ def test_reaction_shutdown_stops_admission_and_joins_current_job(monkeypatch):
     assert shutdown.index("reaction_worker_stop.set()") < shutdown.index("await _drain_with_publication_flush(drain_consumers)")
     assert "drain_campaigns(), drain_reactions()" in shutdown
     assert "await asyncio.gather(reaction_worker_task" in shutdown
+
+
+def test_shutdown_persists_late_evidence_before_propagating_failed_drain():
+    import ast
+    from types import SimpleNamespace
+
+    import pytest
+
+    from app.runtime_utils import wait_for_db_task
+
+    source = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    names = {"_shutdown_runtime", "_drain_with_publication_flush"}
+    module = ast.Module(
+        body=[n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
+              and n.name in names],
+        type_ignores=[],
+    )
+
+    async def scenario(failed_runtime):
+        first_flush = asyncio.Event()
+        saved = asyncio.Event()
+        events = []
+        failure = RuntimeError("drain failed")
+
+        async def persist():
+            if raw.publication_evidence_unpersisted:
+                raw.publication_evidence_unpersisted = False
+                saved.set()
+            first_flush.set()
+
+        async def drain(name, *, wait_until_complete):
+            assert wait_until_complete
+            if name == failed_runtime:
+                await asyncio.wait_for(first_flush.wait(), timeout=1)
+                # Evidence arrives after the periodic flush and before the
+                # drain raises. It must survive the final error path.
+                raw.publication_evidence_unpersisted = True
+                raise failure
+            events.append(name)
+
+        async def unexpected_close():
+            pytest.fail("shared resources closed after a failed drain")
+
+        raw = SimpleNamespace(
+            publication_evidence_unpersisted=False,
+            persist_publication_evidence=persist,
+            disconnect=unexpected_close,
+        )
+        ns = {
+            "asyncio": asyncio, "logger": logging.getLogger(__name__),
+            "runtime_ownership": SimpleNamespace(begin_shutdown=lambda: None),
+            "scheduler_runtime_task": None, "rescan_recovery_task": None,
+            "rescan_recovery_stop": None, "rescan_recovery_job": None,
+            "reaction_worker_task": None, "reaction_worker_stop": None,
+            "rule_ui_tasks": {}, "dashboard_tasks": {},
+            "channel_title_sync_task": None, "job_watchdog_task": None,
+            "wait_for_db_task": wait_for_db_task,
+            "telethon_client": raw, "reaction_clients": [],
+            "sender_service": None, "runtime_context": None,
+            "bot": SimpleNamespace(session=SimpleNamespace(close=unexpected_close)),
+            "stop_background_tasks": unexpected_close,
+            "stop_job_workers_runtime": lambda **kwargs: drain("worker", **kwargs),
+            "repost_campaign_runtime_tasks": SimpleNamespace(
+                stop=lambda **kwargs: drain("campaign", **kwargs),
+            ),
+        }
+        exec(compile(module, "bot.py", "exec"), ns)
+        with pytest.raises(RuntimeError) as exc_info:
+            await asyncio.wait_for(ns["_shutdown_runtime"](
+                stop_workers_runtime=True, close_dashboard_tasks=True,
+                close_telegram_clients=True, close_bot_session=True,
+            ), timeout=2)
+        assert exc_info.value is failure
+        assert saved.is_set() and not raw.publication_evidence_unpersisted
+        assert events == ["campaign" if failed_runtime == "worker" else "worker"]
+
+    for failed_runtime in ("worker", "campaign"):
+        asyncio.run(scenario(failed_runtime))

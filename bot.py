@@ -8738,10 +8738,16 @@ async def _shutdown_runtime(
 
     # Keep one flusher alive across producer and consumer joins.
     repost_campaign_runtime_tasks_local = repost_campaign_runtime_tasks
-    await _drain_with_publication_flush(drain_consumers)
+    drain_error = None
+    try:
+        await _drain_with_publication_flush(drain_consumers)
+    except (Exception, asyncio.CancelledError) as exc:
+        # Do not bypass the final evidence gate on a failed drain.
+        # Shared resources must not be closed on this error path.
+        drain_error = exc
     repost_campaign_runtime_tasks = repost_campaign_runtime_tasks_local
-    workers_drain_complete = True
-    campaign_drain_complete = True
+    workers_drain_complete = drain_error is None
+    campaign_drain_complete = drain_error is None
 
     if close_dashboard_tasks:
         tasks = list(dashboard_tasks.values())
@@ -8787,6 +8793,9 @@ async def _shutdown_runtime(
                 await flush_publication()
             except Exception:
                 logger.exception("PUBLICATION_SHUTDOWN_RETRY_FAILED")
+
+    if drain_error is not None:
+        raise drain_error
 
     await stop_background_tasks()
     if sender_service is not None and workers_drain_complete:
