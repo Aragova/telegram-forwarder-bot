@@ -210,6 +210,10 @@ MENU_NAVIGATION_TEXTS = {
     "📦 Очередь",
     "⚠️ Диагностика",
     "⚙️ Система",
+    "💳 Биллинг и тарифы",
+    "💱 Курсы валют",
+    "💵 Цены тарифов",
+    "💫 Фикс-цены Stars/Crypto",
     "💎 Тарифы",
     "👤 Мой аккаунт",
     "📡 Источники",
@@ -274,8 +278,12 @@ ADMIN_REPLY_KEYBOARD_ALIASES = {
     "⚙ Система": "⚙️ Система",
     "▶ Запустить пересылку": "▶️ Запустить пересылку",
     "▶ Запуск": "▶️ Запустить пересылку",
+    "Запуск": "▶️ Запустить пересылку",
+    "Запустить пересылку": "▶️ Запустить пересылку",
     "⏸ Остановить пересылку": "⏸ Остановить пересылку",
     "⏸ Стоп": "⏸ Остановить пересылку",
+    "Стоп": "⏸ Остановить пересылку",
+    "Остановить пересылку": "⏸ Остановить пересылку",
     "⬅ Назад в меню": "⬅️ Назад в меню",
     "📋 Меню": "📋 Меню",
     "🔙 Главное меню": "🔙 Главное меню",
@@ -7308,36 +7316,6 @@ async def handle_stateful_private_inputs(message: Message):
         text, reply_markup, _ = await build_rule_card_payload_cached(rule_id)
         if text and reply_markup:
             await send_message_safe(chat_id=message.chat.id, text=text, reply_markup=reply_markup, parse_mode="HTML")
-        return
-
-    if action == "admin_billing_usd_price_input":
-        raw = text.replace(",", ".")
-        try:
-            value = float(raw)
-        except Exception:
-            await reply_message_safe(message, "❌ Ошибка: введите положительное число.")
-            return
-        if value <= 0:
-            await reply_message_safe(message, "❌ Ошибка: цена должна быть больше 0.")
-            return
-        if value > 100000:
-            await reply_message_safe(message, "⚠️ Слишком большое значение. Введите более реалистичную цену.")
-            return
-        tariff_code = str(state.get("tariff_code") or "").lower()
-        period_months = int(state.get("period_months") or 0)
-        admin_id = message.from_user.id if message.from_user else settings.admin_id
-        ok = await run_db(
-            db.set_billing_usd_price,
-            tariff_code=tariff_code,
-            period_months=period_months,
-            new_price=value,
-            admin_id=admin_id,
-        )
-        if not ok:
-            await reply_message_safe(message, "❌ Не удалось сохранить цену.")
-            return
-        reset_user_state(admin_id)
-        await reply_message_safe(message, "✅ Цена сохранена.")
         return
 
     if await handle_user_channel_state_message(message, user_channel_ctx):

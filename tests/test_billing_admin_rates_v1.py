@@ -17,9 +17,10 @@ class _Repo:
 def test_admin_system_menu_contains_rates_button():
     kb = get_system_menu()
     texts = [btn.text for row in kb.keyboard for btn in row]
-    assert "💱 Курсы валют" in texts
-    assert "💵 Цены тарифов" in texts
-    assert "💫 Фикс-цены Stars/Crypto" in texts
+    assert "💳 Биллинг и тарифы" in texts
+    assert "💱 Курсы валют" not in texts
+    assert "💵 Цены тарифов" not in texts
+    assert "💫 Фикс-цены Stars/Crypto" not in texts
 
 
 def test_billing_catalog_uses_saved_rate_and_fallback():
@@ -46,4 +47,6 @@ def test_admin_rate_input_not_captured_by_user_state_handler_source_guard():
     assert "admin_billing_rate_input" in source
 
     assert "admin_billing_usd_price_input" in source
-    assert "db.set_billing_usd_price" in source
+    assert "db.set_billing_usd_price" not in source
+    system = __import__("pathlib").Path("app/admin_handlers/system.py").read_text(encoding="utf-8")
+    assert "db.set_billing_usd_price" in system

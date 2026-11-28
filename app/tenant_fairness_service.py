@@ -76,13 +76,13 @@ class TenantFairnessService:
         processing = int(tenant_processing if tenant_processing is not None else 0)
         retry = int(tenant_retry if tenant_retry is not None else 0)
         heavy_pending = int(tenant_heavy_pending if tenant_heavy_pending is not None else 0)
-        weight = self.get_tenant_weight(int(tenant_id))
-
         mode = str(system_mode or "normal").strip().lower()
         queue_name = str(queue or "").strip().lower()
 
         if mode == "normal":
             return False
+
+        weight = self.get_tenant_weight(int(tenant_id))
 
         base_backlog_limit = 120 if mode == "degraded" else 80
         backlog_limit = max(30, int(base_backlog_limit * max(weight, 1)))
