@@ -164,3 +164,31 @@ def test_orphan_confirmation_is_one_use_and_bound_to_operator():
     keyboard = _orphan_page_keyboard(rows, 0)
     assert keyboard.inline_keyboard[-1][-1].callback_data == "stuck_orphan_page:10"
     assert _orphan_page_keyboard([], 10).inline_keyboard[-1][0].callback_data == "stuck_orphan_page:0"
+
+
+def test_orphan_confirmation_rejects_missing_identity_without_consuming_token():
+    from types import SimpleNamespace as NS
+    from app.admin_handlers.diagnostics import _OrphanConfirmations
+
+    store = _OrphanConfirmations()
+    cb = NS(from_user=NS(id=1), message=NS(chat=NS(id=2), message_id=3), data="")
+    token = store.issue(cb, 547, [10])
+    cb.data = "stuck_orphan_cancel:" + token
+    assert store.consume(NS(from_user=None, message=cb.message, data=cb.data)) is None
+    assert store.consume(NS(from_user=cb.from_user, message=None, data=cb.data)) is None
+    assert store.consume(cb) == (547, [10])
+
+
+def test_quarantine_traceback_identifies_operation_without_exception_payload():
+    from app.admin_handlers.diagnostics import _safe_quarantine_traceback
+
+    def failing_db_operation():
+        raise RuntimeError("private-database-value")
+
+    try:
+        failing_db_operation()
+    except RuntimeError as exc:
+        trace = _safe_quarantine_traceback(exc)
+    assert "failing_db_operation" in trace
+    assert "test_delivery_diagnostics_admin_menu.py:" in trace
+    assert "private-database-value" not in trace

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
 from time import monotonic
+from traceback import extract_tb
 from uuid import uuid4
 
 from aiogram import Dispatcher
@@ -113,10 +115,12 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
     async def handle_stuck_orphan_cancel(callback: CallbackQuery):
         if not await ctx.is_admin_callback(callback):
             return
-        if not isinstance(callback.message, Message):
+        if callback.from_user is None or not isinstance(callback.message, Message):
             await ctx.answer_callback_safe(callback, "Ошибка данных", show_alert=True)
             return
-        confirmations.consume(callback)
+        if confirmations.consume(callback) is None:
+            await ctx.answer_callback_safe(callback, "Подтверждение устарело. Откройте диагностику заново.", show_alert=True)
+            return
         await ctx.answer_callback_safe_once(callback, "Отменено")
         await ctx.edit_message_text_safe(message=callback.message, text="<b>🧯 Действие отменено</b>", parse_mode="HTML")
 
@@ -139,7 +143,10 @@ def register_admin_diagnostics_handlers(dp: Dispatcher, ctx: AdminHandlersContex
                 admin_id=callback.from_user.id, expected_ids=ids,
             )
         except Exception as exc:
-            ctx.logger.warning("ORPHAN_QUARANTINE_UNKNOWN | rule_id=%s | error_type=%s", rule_id, type(exc).__name__)
+            ctx.logger.warning(
+                "ORPHAN_QUARANTINE_UNKNOWN | rule_id=%s | error_type=%s | traceback=%s",
+                rule_id, type(exc).__name__, _safe_quarantine_traceback(exc),
+            )
             message = "Результат неизвестен. Обновите диагностику и проверьте состояние правила."
         else:
             status = result.get("status")
@@ -475,11 +482,17 @@ class _OrphanConfirmations:
 
     @staticmethod
     def _scope(callback):
-        return (callback.from_user.id, callback.message.chat.id, callback.message.message_id)
+        user = callback.from_user
+        message = callback.message
+        if user is None or message is None:
+            return None
+        return (user.id, message.chat.id, message.message_id)
 
     def issue(self, callback, rule_id: int, ids: list[int]) -> str:
         now = monotonic()
         scope = self._scope(callback)
+        if scope is None:
+            raise ValueError("Confirmation requires operator and message")
         self._items = {key: item for key, item in self._items.items()
                        if item[0] > now and item[1] != scope}
         if len(self._items) >= 128:
@@ -497,3 +510,11 @@ class _OrphanConfirmations:
         if item[0] <= monotonic():
             return None
         return item[2], list(item[3])
+
+
+def _safe_quarantine_traceback(exc: Exception) -> str:
+    """Identify the failed operation without logging exception text or locals."""
+    frames = extract_tb(exc.__traceback__, limit=-16)
+    return " -> ".join(
+        f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}" for frame in frames
+    ) or "unavailable"
